@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文档智能对比工具</title>
+    <link rel="stylesheet" href="css/style.css">
+    <!-- External Libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jsdiff/5.2.0/diff.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📄 文档智能对比工具</h1>
+            <p class="subtitle">支持 Word (.docx) · PDF (.pdf) · Excel (.xlsx/.xls) 的同格式及跨格式对比</p>
+        </header>
+
+        <!-- Upload Area -->
+        <div class="upload-section">
+            <div class="upload-box" id="uploadBoxA">
+                <div class="upload-content">
+                    <div class="upload-icon">📁</div>
+                    <h3>原文档（基准）</h3>
+                    <p>拖拽文件到此处，或点击选择</p>
+                    <p class="format-hint">支持 .docx / .pdf / .xlsx / .xls</p>
+                    <input type="file" id="fileInputA" accept=".docx,.pdf,.xlsx,.xls" hidden>
+                </div>
+                <div class="file-info" id="fileInfoA" style="display:none;">
+                    <span class="file-name" id="fileNameA"></span>
+                    <span class="file-meta" id="fileMetaA"></span>
+                    <button class="btn-remove" id="removeA" title="移除文件">✕</button>
+                </div>
+            </div>
+            <div class="upload-box" id="uploadBoxB">
+                <div class="upload-content">
+                    <div class="upload-icon">📁</div>
+                    <h3>修改后文档</h3>
+                    <p>拖拽文件到此处，或点击选择</p>
+                    <p class="format-hint">支持 .docx / .pdf / .xlsx / .xls</p>
+                    <input type="file" id="fileInputB" accept=".docx,.pdf,.xlsx,.xls" hidden>
+                </div>
+                <div class="file-info" id="fileInfoB" style="display:none;">
+                    <span class="file-name" id="fileNameB"></span>
+                    <span class="file-meta" id="fileMetaB"></span>
+                    <button class="btn-remove" id="removeB" title="移除文件">✕</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Options -->
+        <div class="options-section">
+            <div class="option-group">
+                <label for="authorName">修订作者名称</label>
+                <input type="text" id="authorName" placeholder="留空则默认为'作者'">
+            </div>
+            <div class="option-group">
+                <label class="switch-label">
+                    <input type="checkbox" id="strictMode">
+                    <span class="switch-slider"></span>
+                    <span>严格模式</span>
+                </label>
+                <p class="option-hint">开启后显示所有原始差异（包括空白、全角/半角等）</p>
+            </div>
+        </div>
+
+        <!-- Action Button -->
+        <div class="action-section">
+            <button class="btn-compare" id="btnCompare" disabled>开始对比</button>
+        </div>
+
+        <!-- Progress -->
+        <div class="progress-section" id="progressSection" style="display:none;">
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <p class="progress-text" id="progressText">准备中...</p>
+            <div class="progress-steps">
+                <div class="step" id="step1">解析文档A</div>
+                <div class="step" id="step2">解析文档B</div>
+                <div class="step" id="step3">OCR处理</div>
+                <div class="step" id="step4">内容对比</div>
+                <div class="step" id="step5">生成修订文档</div>
+            </div>
+        </div>
+
+        <!-- Preview -->
+        <div class="preview-section" id="previewSection" style="display:none;">
+            <h2>对比预览</h2>
+            <div class="stats-bar" id="statsBar"></div>
+            <div class="preview-container">
+                <div class="preview-panel">
+                    <h3>原文档</h3>
+                    <div class="preview-content" id="previewA"></div>
+                </div>
+                <div class="preview-panel">
+                    <h3>修改后文档</h3>
+                    <div class="preview-content" id="previewB"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Download -->
+        <div class="download-section" id="downloadSection" style="display:none;">
+            <button class="btn-download" id="btnDownload">⬇ 下载修订文档 (.docx)</button>
+            <p class="download-hint" id="downloadHint"></p>
+        </div>
+
+        <!-- Error Display -->
+        <div class="error-section" id="errorSection" style="display:none;">
+            <div class="error-content">
+                <span class="error-icon">⚠️</span>
+                <p id="errorText"></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="js/normalizer.js"></script>
+    <script src="js/parsers.js"></script>
+    <script src="js/differ.js"></script>
+    <script src="js/generator.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
