@@ -4,7 +4,9 @@
  * Key design decisions:
  * - Paragraph alignment uses LCS-based DP with similarity scoring
  * - Match threshold 0.5: only pair paragraphs that are genuinely related
- * - Post-processing: if >60% of a "modified" pair is changes, split into delete+insert
+ * - Aligned paragraphs ALWAYS show precise inline character/word-level
+ *   changes (no whole-paragraph collapse), so the user sees the minimal
+ *   set of tokens that were actually added or removed
  * - Character-level diff preserves original text (normalization only for comparison)
  * - N-gram Jaccard similarity for long texts (replaces broken chunk-based approach)
  */
@@ -54,52 +56,21 @@ const Differ = {
                         changes: null
                     });
                 } else {
-                    // Calculate change ratio to decide display strategy
-                    // If most of the text is changed, it's cleaner to show as delete+insert
-                    let changedLen = 0, totalLen = 0;
+                    // Always emit precise inline character/word-level changes.
+                    // Even when most of a paragraph is rewritten, the user wants
+                    // to see exactly which tokens were kept, removed, and added.
+                    diffs.push({
+                        type: 'modified',
+                        paraA: item.paraA,
+                        paraB: item.paraB,
+                        indexA: item.indexA,
+                        indexB: item.indexB,
+                        changes
+                    });
+                    modCount++;
                     for (const c of changes) {
-                        totalLen += c.value.length;
-                        if (c.added || c.removed) changedLen += c.value.length;
-                    }
-                    const changeRatio = totalLen > 0 ? changedLen / totalLen : 0;
-
-                    if (changeRatio > 0.5) {
-                        // Too many changes - split into delete + insert for minimal display
-                        diffs.push({
-                            type: 'deleted',
-                            paraA: item.paraA,
-                            paraB: null,
-                            indexA: item.indexA,
-                            indexB: -1,
-                            changes: null
-                        });
-                        diffs.push({
-                            type: 'inserted',
-                            paraA: null,
-                            paraB: item.paraB,
-                            indexA: -1,
-                            indexB: item.indexB,
-                            changes: null
-                        });
-                        delCount++;
-                        insCount++;
-                        delChars += item.paraA.text.length;
-                        insChars += item.paraB.text.length;
-                    } else {
-                        // Genuine inline modification - show character-level diff
-                        diffs.push({
-                            type: 'modified',
-                            paraA: item.paraA,
-                            paraB: item.paraB,
-                            indexA: item.indexA,
-                            indexB: item.indexB,
-                            changes
-                        });
-                        modCount++;
-                        for (const c of changes) {
-                            if (c.added) insChars += c.value.length;
-                            if (c.removed) delChars += c.value.length;
-                        }
+                        if (c.added) insChars += c.value.length;
+                        if (c.removed) delChars += c.value.length;
                     }
                 }
             } else if (item.type === 'deleted') {
@@ -401,85 +372,6 @@ const Differ = {
                 }
             }
             result.push(entry);
-        }
-
-        // Post-process: collapse "noisy bursts" of alternating tiny changes into a
-        // single before/after pair so the rendered revision is minimal and readable.
-        return this._collapseChangeBursts(result);
-    },
-
-    /**
-     * Collapse bursts of small alternating changes into a single delete+insert
-     * pair. A "burst" is a region with several add/remove segments separated
-     * only by short equal runs. Replacing the whole region with one removed
-     * block followed by one added block produces a much cleaner revision.
-     */
-    _collapseChangeBursts(changes) {
-        if (changes.length < 3) return changes;
-
-        const SMALL_GAP = 4;          // chars in equal-runs that count as gaps
-        const MIN_CHANGES_TO_COLLAPSE = 3;
-
-        const result = [];
-        let i = 0;
-
-        while (i < changes.length) {
-            const cur = changes[i];
-
-            // Pure equal segments pass through
-            if (!cur.added && !cur.removed) {
-                result.push(cur);
-                i++;
-                continue;
-            }
-
-            // Find the extent of a burst starting at i.
-            // A burst extends as long as we see change segments, possibly
-            // separated by small equal runs.
-            let j = i;
-            let lastChangeEnd = i;
-            while (j < changes.length) {
-                const c = changes[j];
-                if (c.added || c.removed) {
-                    lastChangeEnd = j;
-                    j++;
-                    continue;
-                }
-                // equal run: only continue burst if short AND followed by another change
-                if (c.value.length <= SMALL_GAP && j + 1 < changes.length &&
-                    (changes[j + 1].added || changes[j + 1].removed)) {
-                    j++;
-                    continue;
-                }
-                break;
-            }
-
-            // Burst spans [i, lastChangeEnd]
-            const burst = changes.slice(i, lastChangeEnd + 1);
-            const changeCount = burst.filter(c => c.added || c.removed).length;
-
-            if (changeCount >= MIN_CHANGES_TO_COLLAPSE) {
-                // Collapse: emit one removed (old text) + one added (new text)
-                let oldText = '';
-                let newText = '';
-                for (const c of burst) {
-                    if (c.removed) {
-                        oldText += c.value;
-                    } else if (c.added) {
-                        newText += c.value;
-                    } else {
-                        // Equal run inside the burst belongs to both versions
-                        oldText += c.value;
-                        newText += c.value;
-                    }
-                }
-                if (oldText) result.push({ value: oldText, removed: true });
-                if (newText) result.push({ value: newText, added: true });
-            } else {
-                for (const c of burst) result.push(c);
-            }
-
-            i = lastChangeEnd + 1;
         }
 
         return result;
