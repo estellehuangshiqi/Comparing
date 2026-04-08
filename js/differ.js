@@ -63,7 +63,7 @@ const Differ = {
                     }
                     const changeRatio = totalLen > 0 ? changedLen / totalLen : 0;
 
-                    if (changeRatio > 0.6) {
+                    if (changeRatio > 0.5) {
                         // Too many changes - split into delete + insert for minimal display
                         diffs.push({
                             type: 'deleted',
@@ -401,6 +401,85 @@ const Differ = {
                 }
             }
             result.push(entry);
+        }
+
+        // Post-process: collapse "noisy bursts" of alternating tiny changes into a
+        // single before/after pair so the rendered revision is minimal and readable.
+        return this._collapseChangeBursts(result);
+    },
+
+    /**
+     * Collapse bursts of small alternating changes into a single delete+insert
+     * pair. A "burst" is a region with several add/remove segments separated
+     * only by short equal runs. Replacing the whole region with one removed
+     * block followed by one added block produces a much cleaner revision.
+     */
+    _collapseChangeBursts(changes) {
+        if (changes.length < 3) return changes;
+
+        const SMALL_GAP = 4;          // chars in equal-runs that count as gaps
+        const MIN_CHANGES_TO_COLLAPSE = 3;
+
+        const result = [];
+        let i = 0;
+
+        while (i < changes.length) {
+            const cur = changes[i];
+
+            // Pure equal segments pass through
+            if (!cur.added && !cur.removed) {
+                result.push(cur);
+                i++;
+                continue;
+            }
+
+            // Find the extent of a burst starting at i.
+            // A burst extends as long as we see change segments, possibly
+            // separated by small equal runs.
+            let j = i;
+            let lastChangeEnd = i;
+            while (j < changes.length) {
+                const c = changes[j];
+                if (c.added || c.removed) {
+                    lastChangeEnd = j;
+                    j++;
+                    continue;
+                }
+                // equal run: only continue burst if short AND followed by another change
+                if (c.value.length <= SMALL_GAP && j + 1 < changes.length &&
+                    (changes[j + 1].added || changes[j + 1].removed)) {
+                    j++;
+                    continue;
+                }
+                break;
+            }
+
+            // Burst spans [i, lastChangeEnd]
+            const burst = changes.slice(i, lastChangeEnd + 1);
+            const changeCount = burst.filter(c => c.added || c.removed).length;
+
+            if (changeCount >= MIN_CHANGES_TO_COLLAPSE) {
+                // Collapse: emit one removed (old text) + one added (new text)
+                let oldText = '';
+                let newText = '';
+                for (const c of burst) {
+                    if (c.removed) {
+                        oldText += c.value;
+                    } else if (c.added) {
+                        newText += c.value;
+                    } else {
+                        // Equal run inside the burst belongs to both versions
+                        oldText += c.value;
+                        newText += c.value;
+                    }
+                }
+                if (oldText) result.push({ value: oldText, removed: true });
+                if (newText) result.push({ value: newText, added: true });
+            } else {
+                for (const c of burst) result.push(c);
+            }
+
+            i = lastChangeEnd + 1;
         }
 
         return result;

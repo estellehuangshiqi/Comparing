@@ -32,6 +32,11 @@ const Normalizer = {
 
     /**
      * Normalize text for comparison (non-strict mode).
+     *
+     * Designed to be robust to PDF/cross-format extraction quirks: heals
+     * hyphenated line breaks, collapses soft wraps, and discards layout
+     * whitespace so the same content always normalizes to the same string.
+     *
      * @param {string} text
      * @returns {string}
      */
@@ -45,13 +50,22 @@ const Normalizer = {
         // Unify line breaks
         result = result.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
+        // Heal hyphenated word breaks across lines: "sup-\nport" → "support"
+        result = result.replace(/([A-Za-z])-\s*\n\s*([a-z])/g, '$1$2');
+
+        // Soft line break between two CJK characters: drop the break entirely
+        result = result.replace(/([\u4e00-\u9fff])\s*\n\s*([\u4e00-\u9fff])/g, '$1$2');
+
+        // Other line breaks become a single space (latin soft wrap)
+        result = result.replace(/\n+/g, ' ');
+
         // Full-width to half-width
         result = result.split('').map(ch => this.fullToHalf[ch] || ch).join('');
 
         // Normalize whitespace: collapse multiple spaces/tabs into one
         result = result.replace(/[ \t]+/g, ' ');
 
-        // Trim spaces around CJK characters
+        // Trim spaces around CJK characters and CJK punctuation
         result = result.replace(/ ?([\u4e00-\u9fff\u3000-\u303f]) ?/g, '$1');
 
         // Normalize consecutive punctuation
@@ -59,7 +73,7 @@ const Normalizer = {
         result = result.replace(/\.{3,}/g, '…');
         result = result.replace(/…{2,}/g, '……');
 
-        return result;
+        return result.trim();
     },
 
     /**

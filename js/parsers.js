@@ -277,7 +277,13 @@ const Parsers = {
     // ==================== PDF Parser ====================
 
     /**
-     * Parse a PDF file, with OCR fallback for scanned documents
+     * Parse a PDF file, with OCR fallback for scanned documents.
+     *
+     * Layout-aware extraction: groups text items into lines using y-coordinates,
+     * then merges lines into paragraphs based on vertical gaps. Soft line wraps
+     * (including hyphenation) are healed so the same content extracted from two
+     * PDFs produces matching paragraphs even if line breaks differ.
+     *
      * @param {File} file
      * @param {Function} onProgress
      * @returns {Promise<DocContent>}
@@ -309,38 +315,44 @@ const Parsers = {
             const page = await pdfDoc.getPage(i);
             const textContent = await page.getTextContent();
 
-            // Extract text from text layer
-            let pageText = textContent.items.map(item => item.str).join('');
+            // Layout-aware paragraph extraction
+            let pageParas = this._extractPdfParagraphs(textContent);
 
-            // Check if page is scanned (too few characters)
-            if (pageText.replace(/\s/g, '').length < 50) {
-                // Try OCR
+            // Detect scanned page (too few extractable characters)
+            const totalText = pageParas.map(p => p.text).join('');
+            if (totalText.replace(/\s/g, '').length < 50) {
                 onProgress && onProgress(`正在识别第 ${i}/${pageCount} 页（OCR）...`);
                 ocrUsed = true;
 
                 try {
                     const ocrText = await this._ocrPage(page, i, pageCount, onProgress);
                     if (ocrText && ocrText.trim().length > 0) {
-                        pageText = ocrText;
+                        pageParas = this._textToParagraphs(ocrText);
                     } else {
-                        pageText = `[第${i}页：该页图像质量过低，无法识别]`;
+                        pageParas = [{
+                            text: `[第${i}页：该页图像质量过低，无法识别]`,
+                            runs: [{ text: `[第${i}页：该页图像质量过低，无法识别]`, style: {} }],
+                            style: {}
+                        }];
                     }
                 } catch (e) {
-                    pageText = `[第${i}页：OCR识别失败 - ${e.message}]`;
+                    pageParas = [{
+                        text: `[第${i}页：OCR识别失败 - ${e.message}]`,
+                        runs: [{ text: `[第${i}页：OCR识别失败 - ${e.message}]`, style: {} }],
+                        style: {}
+                    }];
                 }
             }
 
-            // Split into paragraphs by double newline or single newline
-            const pageParas = pageText.split(/\n\s*\n|\n/).filter(p => p.trim());
-            for (const pText of pageParas) {
-                const trimmed = pText.trim();
-                if (trimmed) {
-                    paragraphs.push({
-                        text: trimmed,
-                        runs: [{ text: trimmed, style: {} }],
-                        style: {}
-                    });
-                    totalChars += trimmed.length;
+            for (const p of pageParas) {
+                if (p.text && p.text.trim()) {
+                    if (!p.runs || p.runs.length === 0) {
+                        p.runs = [{ text: p.text, style: p.style || {} }];
+                    }
+                    p.style = p.style || {};
+                    p.style.pageNumber = i;
+                    paragraphs.push(p);
+                    totalChars += p.text.length;
                 }
             }
         }
@@ -359,6 +371,212 @@ const Parsers = {
                 ocrUsed
             }
         };
+    },
+
+    /**
+     * Extract paragraphs from a PDF page's text content using layout info.
+     * Items are first grouped into lines by y-coordinate, then lines into
+     * paragraphs by larger vertical gaps. Soft wraps and hyphenation are
+     * healed when merging lines into a paragraph.
+     */
+    _extractPdfParagraphs(textContent) {
+        const items = (textContent.items || []).filter(it => it && typeof it.str === 'string');
+        if (items.length === 0) return [];
+
+        // Step 1: group items into lines by y-coordinate
+        const rawLines = [];
+        let currentLine = null;
+
+        for (const item of items) {
+            const tr = item.transform || [1, 0, 0, 1, 0, 0];
+            const y = tr[5];
+            const x = tr[4];
+            const fontH = item.height || Math.abs(tr[3]) || 12;
+
+            if (!currentLine) {
+                currentLine = { y, x, height: fontH, items: [item] };
+            } else {
+                const yTol = Math.max(2, currentLine.height * 0.5);
+                if (Math.abs(y - currentLine.y) <= yTol) {
+                    currentLine.items.push(item);
+                    if (fontH > currentLine.height) currentLine.height = fontH;
+                    if (x < currentLine.x) currentLine.x = x;
+                } else {
+                    rawLines.push(currentLine);
+                    currentLine = { y, x, height: fontH, items: [item] };
+                }
+            }
+
+            // hasEOL flag from pdf.js: forces line break
+            if (item.hasEOL) {
+                rawLines.push(currentLine);
+                currentLine = null;
+            }
+        }
+        if (currentLine) rawLines.push(currentLine);
+
+        // Step 2: turn each raw line into a structured line object with text + style
+        const lines = rawLines.map(rl => this._buildPdfLine(rl)).filter(l => l !== null);
+        if (lines.length === 0) return [];
+
+        // Step 3: estimate typical inter-line gap to detect paragraph breaks
+        const gaps = [];
+        for (let k = 1; k < lines.length; k++) {
+            const g = Math.abs(lines[k - 1].y - lines[k].y);
+            if (g > 0) gaps.push(g);
+        }
+        gaps.sort((a, b) => a - b);
+        const medianGap = gaps.length > 0 ? gaps[Math.floor(gaps.length / 2)] : 14;
+        const paraGapThreshold = medianGap * 1.55;
+
+        // Step 4: group lines into paragraphs by vertical gap
+        const paragraphs = [];
+        let buffer = [];
+
+        for (let k = 0; k < lines.length; k++) {
+            const line = lines[k];
+            if (!line.text.trim()) {
+                if (buffer.length > 0) {
+                    paragraphs.push(this._mergePdfLines(buffer));
+                    buffer = [];
+                }
+                continue;
+            }
+
+            if (buffer.length > 0) {
+                const prev = buffer[buffer.length - 1];
+                const gap = Math.abs(prev.y - line.y);
+                if (gap > paraGapThreshold) {
+                    paragraphs.push(this._mergePdfLines(buffer));
+                    buffer = [];
+                }
+            }
+            buffer.push(line);
+        }
+        if (buffer.length > 0) paragraphs.push(this._mergePdfLines(buffer));
+
+        return paragraphs;
+    },
+
+    /**
+     * Build a structured line from a group of pdf.js text items.
+     */
+    _buildPdfLine(rawLine) {
+        // Sort items left-to-right
+        const sorted = [...rawLine.items].sort((a, b) => {
+            const ax = (a.transform || [0, 0, 0, 0, 0, 0])[4];
+            const bx = (b.transform || [0, 0, 0, 0, 0, 0])[4];
+            return ax - bx;
+        });
+
+        let text = '';
+        let lastEnd = null;
+        let lastWasCJK = false;
+
+        for (const item of sorted) {
+            if (!item.str) continue;
+            const tr = item.transform || [1, 0, 0, 1, 0, 0];
+            const x = tr[4];
+            const w = item.width || 0;
+            const fontH = item.height || Math.abs(tr[3]) || 12;
+            const startsCJK = this._isCJKChar(item.str.charAt(0));
+
+            if (lastEnd !== null && text && !text.endsWith(' ') && !item.str.startsWith(' ')) {
+                const gap = x - lastEnd;
+                // Insert space if there's a visible gap, but not between two CJK chars
+                if (gap > fontH * 0.25 && !(lastWasCJK && startsCJK)) {
+                    text += ' ';
+                }
+            }
+
+            text += item.str;
+            lastEnd = x + w;
+            const lastChar = item.str.charAt(item.str.length - 1);
+            lastWasCJK = this._isCJKChar(lastChar);
+        }
+
+        if (!text) return null;
+
+        // Capture dominant font info from the first non-empty item
+        const styleSrc = sorted.find(it => it.str && it.str.trim());
+        const style = {};
+        if (styleSrc) {
+            if (styleSrc.fontName) style.fontName = styleSrc.fontName;
+            const h = styleSrc.height || Math.abs((styleSrc.transform || [0, 0, 0, 12])[3]);
+            if (h) style.fontSize = Math.max(8, Math.round(h * 2));
+        }
+
+        return {
+            y: rawLine.y,
+            x: rawLine.x,
+            height: rawLine.height,
+            text,
+            style
+        };
+    },
+
+    /**
+     * Merge a sequence of lines belonging to the same paragraph, healing
+     * soft wraps and hyphenation so the same content always normalizes
+     * to the same paragraph string.
+     */
+    _mergePdfLines(lines) {
+        let text = '';
+        for (let i = 0; i < lines.length; i++) {
+            const lineText = lines[i].text;
+            if (i === 0) {
+                text = lineText;
+                continue;
+            }
+
+            const prevEnds = text.slice(-1);
+            const nextStarts = lineText.charAt(0);
+
+            if (prevEnds === '-' && /[a-zA-Z]/.test(nextStarts)) {
+                // Hyphenated word break: drop the hyphen and join
+                text = text.slice(0, -1) + lineText;
+            } else if (this._isCJKChar(prevEnds) && this._isCJKChar(nextStarts)) {
+                // CJK soft wrap: no inserted space
+                text += lineText;
+            } else {
+                if (!text.endsWith(' ') && !lineText.startsWith(' ')) {
+                    text += ' ';
+                }
+                text += lineText;
+            }
+        }
+
+        text = text.trim();
+        const style = lines[0] && lines[0].style ? { ...lines[0].style } : {};
+        return {
+            text,
+            runs: [{ text, style }],
+            style
+        };
+    },
+
+    /**
+     * Convert plain text (e.g. OCR output) into paragraph objects.
+     */
+    _textToParagraphs(text) {
+        return text
+            .split(/\n\s*\n|\n/)
+            .map(t => t.trim())
+            .filter(t => t.length > 0)
+            .map(t => ({
+                text: t,
+                runs: [{ text: t, style: {} }],
+                style: {}
+            }));
+    },
+
+    _isCJKChar(ch) {
+        if (!ch) return false;
+        const code = ch.charCodeAt(0);
+        return (code >= 0x4E00 && code <= 0x9FFF) ||
+               (code >= 0x3400 && code <= 0x4DBF) ||
+               (code >= 0xF900 && code <= 0xFAFF) ||
+               (code >= 0x3040 && code <= 0x30FF);
     },
 
     /**
