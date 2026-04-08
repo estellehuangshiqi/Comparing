@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - claude/document-comparison-tool-vdhqw
+      - claude/fix-doc-comparison-tool-Am80U
 
 permissions:
   contents: read
