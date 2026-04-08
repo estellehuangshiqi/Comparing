@@ -1,5 +1,12 @@
 /**
  * Diff engine: paragraph alignment + character/word level diff.
+ *
+ * Key design decisions:
+ * - Paragraph alignment uses LCS-based DP with similarity scoring
+ * - Match threshold 0.5: only pair paragraphs that are genuinely related
+ * - Post-processing: if >60% of a "modified" pair is changes, split into delete+insert
+ * - Character-level diff preserves original text (normalization only for comparison)
+ * - N-gram Jaccard similarity for long texts (replaces broken chunk-based approach)
  */
 const Differ = {
 
@@ -21,7 +28,6 @@ const Differ = {
         const diffs = [];
         let insCount = 0, delCount = 0, modCount = 0;
         let insChars = 0, delChars = 0;
-        const totalCharsA = parasA.reduce((s, p) => s + p.text.length, 0);
 
         for (const item of alignment) {
             if (item.type === 'equal') {
@@ -35,9 +41,10 @@ const Differ = {
                 });
             } else if (item.type === 'modified') {
                 const changes = this._diffText(item.paraA.text, item.paraB.text, strictMode);
-                // Check if there are actual changes after normalization
                 const hasRealChanges = changes.some(c => c.added || c.removed);
+
                 if (!hasRealChanges) {
+                    // Normalization made them equal - treat as unchanged
                     diffs.push({
                         type: 'equal',
                         paraA: item.paraA,
@@ -47,18 +54,52 @@ const Differ = {
                         changes: null
                     });
                 } else {
-                    diffs.push({
-                        type: 'modified',
-                        paraA: item.paraA,
-                        paraB: item.paraB,
-                        indexA: item.indexA,
-                        indexB: item.indexB,
-                        changes
-                    });
-                    modCount++;
+                    // Calculate change ratio to decide display strategy
+                    // If most of the text is changed, it's cleaner to show as delete+insert
+                    let changedLen = 0, totalLen = 0;
                     for (const c of changes) {
-                        if (c.added) insChars += c.value.length;
-                        if (c.removed) delChars += c.value.length;
+                        totalLen += c.value.length;
+                        if (c.added || c.removed) changedLen += c.value.length;
+                    }
+                    const changeRatio = totalLen > 0 ? changedLen / totalLen : 0;
+
+                    if (changeRatio > 0.6) {
+                        // Too many changes - split into delete + insert for minimal display
+                        diffs.push({
+                            type: 'deleted',
+                            paraA: item.paraA,
+                            paraB: null,
+                            indexA: item.indexA,
+                            indexB: -1,
+                            changes: null
+                        });
+                        diffs.push({
+                            type: 'inserted',
+                            paraA: null,
+                            paraB: item.paraB,
+                            indexA: -1,
+                            indexB: item.indexB,
+                            changes: null
+                        });
+                        delCount++;
+                        insCount++;
+                        delChars += item.paraA.text.length;
+                        insChars += item.paraB.text.length;
+                    } else {
+                        // Genuine inline modification - show character-level diff
+                        diffs.push({
+                            type: 'modified',
+                            paraA: item.paraA,
+                            paraB: item.paraB,
+                            indexA: item.indexA,
+                            indexB: item.indexB,
+                            changes
+                        });
+                        modCount++;
+                        for (const c of changes) {
+                            if (c.added) insChars += c.value.length;
+                            if (c.removed) delChars += c.value.length;
+                        }
                     }
                 }
             } else if (item.type === 'deleted') {
@@ -86,14 +127,6 @@ const Differ = {
             }
         }
 
-        // Granularity warning check
-        const modifiedChars = insChars + delChars;
-        const similarity = totalCharsA > 0 ? 1 - (modifiedChars / (totalCharsA * 2)) : 1;
-        let warning = null;
-        if (modifiedChars > totalCharsA * 0.7 && similarity > 0.3) {
-            warning = '修订粒度可能过粗，建议检查对比结果';
-        }
-
         return {
             diffs,
             stats: {
@@ -105,13 +138,13 @@ const Differ = {
                 insertedChars: insChars,
                 deletedChars: delChars,
             },
-            warning
+            warning: null
         };
     },
 
     /**
      * Align paragraphs from two documents using LCS-based approach.
-     * This ensures that matching paragraphs are paired, and unmatched ones are marked as inserted/deleted.
+     * Pre-normalizes all texts to avoid redundant normalization in O(n*m) comparisons.
      */
     _alignParagraphs(parasA, parasB, strictMode) {
         const n = parasA.length;
@@ -121,21 +154,29 @@ const Differ = {
         if (n === 0) return parasB.map((p, i) => ({ type: 'inserted', paraB: p, indexB: i }));
         if (m === 0) return parasA.map((p, i) => ({ type: 'deleted', paraA: p, indexA: i }));
 
+        // Pre-normalize texts once for all similarity computations
+        const normsA = parasA.map(p => strictMode ? p.text : Normalizer.normalize(p.text));
+        const normsB = parasB.map(p => strictMode ? p.text : Normalizer.normalize(p.text));
+
         // Compute similarity matrix
         const simMatrix = [];
         for (let i = 0; i < n; i++) {
-            simMatrix[i] = [];
+            simMatrix[i] = new Float64Array(m);
             for (let j = 0; j < m; j++) {
-                simMatrix[i][j] = this._similarity(parasA[i].text, parasB[j].text, strictMode);
+                if (normsA[i] === normsB[j]) {
+                    simMatrix[i][j] = 1.0;
+                } else {
+                    simMatrix[i][j] = this._similarityPreNorm(normsA[i], normsB[j]);
+                }
             }
         }
 
-        // Use dynamic programming to find optimal alignment (similar to LCS but with similarity scores)
-        const MATCH_THRESHOLD = 0.3; // Minimum similarity to consider as a match
+        // Dynamic programming: find optimal alignment maximizing total similarity
+        // Only pair paragraphs with similarity >= MATCH_THRESHOLD
+        const MATCH_THRESHOLD = 0.5;
         const dp = Array.from({ length: n + 1 }, () => new Float64Array(m + 1));
         const trace = Array.from({ length: n + 1 }, () => new Int8Array(m + 1));
 
-        // Fill DP table
         for (let i = 1; i <= n; i++) {
             for (let j = 1; j <= m; j++) {
                 const sim = simMatrix[i - 1][j - 1];
@@ -201,32 +242,79 @@ const Differ = {
     },
 
     /**
-     * Calculate similarity between two strings (0-1)
+     * Calculate similarity between two pre-normalized strings (0-1).
+     * Uses Levenshtein for texts up to 2000 chars, n-gram Jaccard for longer.
      */
-    _similarity(a, b, strictMode) {
-        const textA = strictMode ? a : Normalizer.normalize(a);
-        const textB = strictMode ? b : Normalizer.normalize(b);
-
+    _similarityPreNorm(textA, textB) {
         if (textA === textB) return 1.0;
         if (!textA && !textB) return 1.0;
         if (!textA || !textB) return 0.0;
 
-        // Quick length-based filter
-        const lenRatio = Math.min(textA.length, textB.length) / Math.max(textA.length, textB.length);
-        if (lenRatio < 0.3) return 0.0;
+        const lenA = textA.length;
+        const lenB = textB.length;
+        const maxLen = Math.max(lenA, lenB);
+        const lenRatio = Math.min(lenA, lenB) / maxLen;
 
-        // Use Levenshtein-based similarity for short strings, LCS ratio for longer
-        if (textA.length < 200 && textB.length < 200) {
+        // Quick reject for very different lengths
+        if (lenRatio < 0.2) return 0.0;
+
+        // Use Levenshtein for texts up to 2000 chars (accurate, O(n*m))
+        if (maxLen <= 2000) {
             const dist = this._levenshtein(textA, textB);
-            return 1 - dist / Math.max(textA.length, textB.length);
+            return 1 - dist / maxLen;
         }
 
-        // For longer strings, use a simpler approach: common character ratio
-        return this._lcsRatio(textA, textB);
+        // For longer texts, use n-gram Jaccard similarity (fast, O(n+m))
+        return this._ngramSimilarity(textA, textB, 3);
     },
 
     /**
-     * Levenshtein distance
+     * Backward-compatible similarity with optional normalization.
+     */
+    _similarity(a, b, strictMode) {
+        const textA = strictMode ? a : Normalizer.normalize(a);
+        const textB = strictMode ? b : Normalizer.normalize(b);
+        return this._similarityPreNorm(textA, textB);
+    },
+
+    /**
+     * N-gram based Jaccard similarity for longer texts.
+     * Uses character-level n-grams with multiset Jaccard index.
+     * Much more accurate than the previous chunk-based approach.
+     */
+    _ngramSimilarity(a, b, n) {
+        if (a.length < n && b.length < n) {
+            return a === b ? 1.0 : 0.0;
+        }
+
+        const ngramsA = new Map();
+        for (let i = 0; i <= a.length - n; i++) {
+            const ng = a.substring(i, i + n);
+            ngramsA.set(ng, (ngramsA.get(ng) || 0) + 1);
+        }
+
+        const ngramsB = new Map();
+        for (let i = 0; i <= b.length - n; i++) {
+            const ng = b.substring(i, i + n);
+            ngramsB.set(ng, (ngramsB.get(ng) || 0) + 1);
+        }
+
+        let intersection = 0;
+        let union = 0;
+
+        const allKeys = new Set([...ngramsA.keys(), ...ngramsB.keys()]);
+        for (const key of allKeys) {
+            const countA = ngramsA.get(key) || 0;
+            const countB = ngramsB.get(key) || 0;
+            intersection += Math.min(countA, countB);
+            union += Math.max(countA, countB);
+        }
+
+        return union > 0 ? intersection / union : 0;
+    },
+
+    /**
+     * Levenshtein distance (space-optimized two-row approach).
      */
     _levenshtein(a, b) {
         const n = a.length, m = b.length;
@@ -253,46 +341,46 @@ const Differ = {
     },
 
     /**
-     * LCS ratio for longer texts (approximate using chunks)
-     */
-    _lcsRatio(a, b) {
-        // Sample-based approach for performance
-        const sampleSize = 100;
-        const chunkSize = Math.max(2, Math.floor(a.length / sampleSize));
-        const chunks = new Set();
-        for (let i = 0; i <= a.length - chunkSize; i += chunkSize) {
-            chunks.add(a.substring(i, i + chunkSize));
-        }
-        let matches = 0;
-        const totalChunksB = Math.ceil(b.length / chunkSize);
-        for (let i = 0; i <= b.length - chunkSize; i += chunkSize) {
-            if (chunks.has(b.substring(i, i + chunkSize))) matches++;
-        }
-        return totalChunksB > 0 ? matches / totalChunksB : 0;
-    },
-
-    /**
      * Character/word level diff between two texts.
      * Chinese: character-level; English: word-level.
      * Returns array of {value, added?, removed?} objects.
+     *
+     * In non-strict mode, uses original text for output but normalization
+     * for comparison via a custom comparator. This preserves the original
+     * character forms (e.g., full-width punctuation) in the result while
+     * ignoring normalization-level differences.
      */
     _diffText(textA, textB, strictMode) {
-        let a = textA;
-        let b = textB;
+        // Exact match - no changes
+        if (textA === textB) return [{ value: textA }];
 
-        if (!strictMode) {
-            a = Normalizer.normalize(a);
-            b = Normalizer.normalize(b);
+        // Normalized match (non-strict only) - treat as equal
+        if (!strictMode && Normalizer.normalize(textA) === Normalizer.normalize(textB)) {
+            return [{ value: textA }];
         }
 
-        if (a === b) return [{ value: textA }];
+        // Tokenize ORIGINAL text (preserves original characters in output)
+        const tokensA = this._tokenize(textA);
+        const tokensB = this._tokenize(textB);
 
-        // Tokenize: split into characters for CJK, words for Latin
-        const tokensA = this._tokenize(a);
-        const tokensB = this._tokenize(b);
+        // For non-strict mode, use a comparator that normalizes tokens before comparing
+        // This way the diff output contains original text but comparison ignores
+        // normalization differences (full-width/half-width, whitespace, etc.)
+        const options = {};
+        if (!strictMode) {
+            const cache = new Map();
+            const norm = (t) => {
+                let v = cache.get(t);
+                if (v === undefined) {
+                    v = Normalizer.normalize(t);
+                    cache.set(t, v);
+                }
+                return v;
+            };
+            options.comparator = (a, b) => norm(a) === norm(b);
+        }
 
-        // Use jsdiff on tokens
-        const changes = Diff.diffArrays(tokensA, tokensB);
+        const changes = Diff.diffArrays(tokensA, tokensB, options);
 
         // Merge tokens back into strings and consolidate adjacent same-type operations
         const result = [];
@@ -349,7 +437,7 @@ const Differ = {
             } else if (/[a-zA-Z0-9]/.test(text[i])) {
                 // Latin word
                 let word = '';
-                while (i < text.length && /[a-zA-Z0-9''-]/.test(text[i])) {
+                while (i < text.length && /[a-zA-Z0-9''\-]/.test(text[i])) {
                     word += text[i];
                     i++;
                 }
