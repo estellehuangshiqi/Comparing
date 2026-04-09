@@ -37,15 +37,13 @@
     const downloadHint = document.getElementById('downloadHint');
     const errorSection = document.getElementById('errorSection');
     const errorText = document.getElementById('errorText');
-    const catBox = document.getElementById('catBox');
-    const catInput = document.getElementById('catInput');
-    const catPreview = document.getElementById('catPreview');
-    const catPlaceholder = document.getElementById('catPlaceholder');
-    const removeCat = document.getElementById('removeCat');
-
     const SUPPORTED_TYPES = ['.docx', '.pdf', '.xlsx', '.xls'];
-    const DEFAULT_CAT_SRC = 'assets/cat.png';
-    let catIsCustom = false;
+    const CAT_SLOTS = [
+        { idx: 1, defaultSrc: 'assets/cat1.png' },
+        { idx: 2, defaultSrc: 'assets/cat2.png' },
+    ];
+    // Per-slot state: whether the current image is a user-uploaded custom one.
+    const catIsCustom = { 1: false, 2: false };
 
     // ==================== File Upload Handling ====================
 
@@ -135,76 +133,88 @@
 
     // ==================== Cat Image Upload ====================
 
-    function setupCatUpload() {
-        // If the default image loads, show it; otherwise fall back to placeholder.
-        catPreview.addEventListener('load', () => {
-            catPreview.style.display = '';
-            catPlaceholder.style.display = 'none';
-            catBox.classList.add('has-image');
+    function setupCatUpload(slot) {
+        const idx = slot.idx;
+        const box = document.getElementById('catBox' + idx);
+        const input = document.getElementById('catInput' + idx);
+        const preview = document.getElementById('catPreview' + idx);
+        const placeholder = document.getElementById('catPlaceholder' + idx);
+        const removeBtn = document.getElementById('removeCat' + idx);
+
+        // If the image (default or custom) loads, show it; otherwise fall back
+        // to the placeholder so a missing default doesn't leave a broken icon.
+        preview.addEventListener('load', () => {
+            preview.style.display = '';
+            placeholder.style.display = 'none';
+            box.classList.add('has-image');
         });
-        catPreview.addEventListener('error', () => {
-            catPreview.style.display = 'none';
-            catPlaceholder.style.display = '';
-            catBox.classList.remove('has-image');
-            if (catIsCustom) {
-                // Custom image failed (shouldn't happen for data URLs) — reset.
-                catIsCustom = false;
-                removeCat.style.display = 'none';
+        preview.addEventListener('error', () => {
+            preview.style.display = 'none';
+            placeholder.style.display = '';
+            box.classList.remove('has-image');
+            if (catIsCustom[idx]) {
+                catIsCustom[idx] = false;
+                removeBtn.style.display = 'none';
             }
         });
 
-        catBox.addEventListener('click', (e) => {
+        box.addEventListener('click', (e) => {
             if (e.target.closest('.btn-remove-cat')) return;
-            catInput.click();
+            input.click();
         });
 
-        catBox.addEventListener('dragover', (e) => {
+        box.addEventListener('dragover', (e) => {
             e.preventDefault();
-            catBox.classList.add('dragover');
+            box.classList.add('dragover');
         });
 
-        catBox.addEventListener('dragleave', () => {
-            catBox.classList.remove('dragover');
+        box.addEventListener('dragleave', () => {
+            box.classList.remove('dragover');
         });
 
-        catBox.addEventListener('drop', (e) => {
+        box.addEventListener('drop', (e) => {
             e.preventDefault();
-            catBox.classList.remove('dragover');
+            box.classList.remove('dragover');
             const file = e.dataTransfer.files[0];
-            if (file) handleCatFile(file);
+            if (file) handleCatFile(file, slot);
         });
 
-        catInput.addEventListener('change', () => {
-            if (catInput.files[0]) handleCatFile(catInput.files[0]);
+        input.addEventListener('change', () => {
+            if (input.files[0]) handleCatFile(input.files[0], slot);
         });
 
-        removeCat.addEventListener('click', (e) => {
+        removeBtn.addEventListener('click', (e) => {
             e.stopPropagation();
-            clearCatImage();
+            clearCatImage(slot);
         });
     }
 
-    function handleCatFile(file) {
+    function handleCatFile(file, slot) {
         if (!file.type.startsWith('image/')) {
             showError('请上传图片文件（PNG / JPG / GIF / WebP）');
             return;
         }
+        const preview = document.getElementById('catPreview' + slot.idx);
+        const removeBtn = document.getElementById('removeCat' + slot.idx);
         const reader = new FileReader();
         reader.onload = (e) => {
-            catPreview.src = e.target.result;
-            catIsCustom = true;
-            removeCat.style.display = '';
+            preview.src = e.target.result;
+            catIsCustom[slot.idx] = true;
+            removeBtn.style.display = '';
         };
         reader.readAsDataURL(file);
         hideError();
     }
 
-    function clearCatImage() {
+    function clearCatImage(slot) {
         // Restore the default cat image instead of going back to the placeholder.
-        catIsCustom = false;
-        catPreview.src = DEFAULT_CAT_SRC;
-        removeCat.style.display = 'none';
-        catInput.value = '';
+        const preview = document.getElementById('catPreview' + slot.idx);
+        const input = document.getElementById('catInput' + slot.idx);
+        const removeBtn = document.getElementById('removeCat' + slot.idx);
+        catIsCustom[slot.idx] = false;
+        preview.src = slot.defaultSrc;
+        removeBtn.style.display = 'none';
+        input.value = '';
     }
 
     // ==================== Progress ====================
@@ -436,7 +446,9 @@
     function init() {
         setupUploadBox(uploadBoxA, fileInputA, 'A');
         setupUploadBox(uploadBoxB, fileInputB, 'B');
-        setupCatUpload();
+        for (const slot of CAT_SLOTS) {
+            setupCatUpload(slot);
+        }
 
         removeA.addEventListener('click', (e) => {
             e.stopPropagation();
