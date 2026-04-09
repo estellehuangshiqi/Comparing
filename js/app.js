@@ -44,6 +44,8 @@
     const removeCat = document.getElementById('removeCat');
 
     const SUPPORTED_TYPES = ['.docx', '.pdf', '.xlsx', '.xls'];
+    const DEFAULT_CAT_SRC = 'assets/cat.png';
+    let catIsCustom = false;
 
     // ==================== File Upload Handling ====================
 
@@ -134,6 +136,23 @@
     // ==================== Cat Image Upload ====================
 
     function setupCatUpload() {
+        // If the default image loads, show it; otherwise fall back to placeholder.
+        catPreview.addEventListener('load', () => {
+            catPreview.style.display = '';
+            catPlaceholder.style.display = 'none';
+            catBox.classList.add('has-image');
+        });
+        catPreview.addEventListener('error', () => {
+            catPreview.style.display = 'none';
+            catPlaceholder.style.display = '';
+            catBox.classList.remove('has-image');
+            if (catIsCustom) {
+                // Custom image failed (shouldn't happen for data URLs) — reset.
+                catIsCustom = false;
+                removeCat.style.display = 'none';
+            }
+        });
+
         catBox.addEventListener('click', (e) => {
             if (e.target.closest('.btn-remove-cat')) return;
             catInput.click();
@@ -173,21 +192,18 @@
         const reader = new FileReader();
         reader.onload = (e) => {
             catPreview.src = e.target.result;
-            catPreview.style.display = '';
-            catPlaceholder.style.display = 'none';
+            catIsCustom = true;
             removeCat.style.display = '';
-            catBox.classList.add('has-image');
         };
         reader.readAsDataURL(file);
         hideError();
     }
 
     function clearCatImage() {
-        catPreview.src = '';
-        catPreview.style.display = 'none';
-        catPlaceholder.style.display = '';
+        // Restore the default cat image instead of going back to the placeholder.
+        catIsCustom = false;
+        catPreview.src = DEFAULT_CAT_SRC;
         removeCat.style.display = 'none';
-        catBox.classList.remove('has-image');
         catInput.value = '';
     }
 

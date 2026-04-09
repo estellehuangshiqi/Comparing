@@ -22,13 +22,13 @@
         <!-- Cat Image Upload -->
         <div class="cat-section" id="catSection">
             <div class="cat-box" id="catBox">
-                <div class="cat-placeholder" id="catPlaceholder">
+                <div class="cat-placeholder" id="catPlaceholder" style="display:none;">
                     <div class="cat-icon">🐱</div>
                     <p>点击或拖拽上传小猫图片</p>
                     <p class="cat-hint">支持 PNG / JPG / GIF / WebP</p>
                 </div>
-                <img class="cat-preview" id="catPreview" alt="小猫图片" style="display:none;">
-                <button class="btn-remove btn-remove-cat" id="removeCat" title="移除图片" style="display:none;">✕</button>
+                <img class="cat-preview" id="catPreview" src="assets/cat.png" alt="小猫图片">
+                <button class="btn-remove btn-remove-cat" id="removeCat" title="换成默认小猫" style="display:none;">✕</button>
             </div>
             <input type="file" id="catInput" accept="image/*" hidden>
         </div>
