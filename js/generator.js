@@ -418,40 +418,23 @@ ${bodyContent}
 
     /**
      * Build the body XML content from diff results (for new DOCX generation).
+     * Preserves per-run style information (font, size, bold, italic) when
+     * available so non-DOCX sources (e.g. PDF) render with formatting close
+     * to the original rather than a plain-text dump.
      */
     _buildBodyXml(diffResult, author, date) {
         const lines = [];
+        const authorEsc = this._escapeXml(author);
 
         for (const diff of diffResult.diffs) {
             if (diff.type === 'equal') {
-                // Unchanged paragraph
-                const text = this._escapeXml(diff.paraA.text);
-                lines.push(`    <w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`);
+                lines.push(this._buildPlainParaXml(diff.paraB || diff.paraA));
             } else if (diff.type === 'modified') {
-                // Modified paragraph - inline track changes
-                lines.push(this._buildModifiedParaXml(diff.changes, author, date));
+                lines.push(this._buildModifiedParaXml(diff.changes, diff.paraA, diff.paraB, authorEsc, date));
             } else if (diff.type === 'deleted') {
-                // Entire paragraph deleted
-                const text = this._escapeXml(diff.paraA.text);
-                const id1 = this._revId++;
-                const id2 = this._revId++;
-                lines.push(`    <w:p>
-      <w:pPr><w:rPr><w:del w:id="${id1}" w:author="${this._escapeXml(author)}" w:date="${date}"/></w:rPr></w:pPr>
-      <w:del w:id="${id2}" w:author="${this._escapeXml(author)}" w:date="${date}">
-        <w:r><w:delText xml:space="preserve">${text}</w:delText></w:r>
-      </w:del>
-    </w:p>`);
+                lines.push(this._buildWholeParaDeletedXml(diff.paraA, authorEsc, date));
             } else if (diff.type === 'inserted') {
-                // Entire paragraph inserted
-                const text = this._escapeXml(diff.paraB.text);
-                const id1 = this._revId++;
-                const id2 = this._revId++;
-                lines.push(`    <w:p>
-      <w:pPr><w:rPr><w:ins w:id="${id1}" w:author="${this._escapeXml(author)}" w:date="${date}"/></w:rPr></w:pPr>
-      <w:ins w:id="${id2}" w:author="${this._escapeXml(author)}" w:date="${date}">
-        <w:r><w:t xml:space="preserve">${text}</w:t></w:r>
-      </w:ins>
-    </w:p>`);
+                lines.push(this._buildWholeParaInsertedXml(diff.paraB, authorEsc, date));
             }
         }
 
@@ -459,30 +442,222 @@ ${bodyContent}
     },
 
     /**
-     * Build XML for a modified paragraph with inline track changes.
+     * Build an unchanged paragraph preserving its runs/styles.
      */
-    _buildModifiedParaXml(changes, author, date) {
+    _buildPlainParaXml(para) {
         const parts = ['    <w:p>'];
+        const pPr = this._buildPPrXml(para && para.style);
+        if (pPr) parts.push('      ' + pPr);
+        for (const run of this._runsFor(para)) {
+            parts.push('      ' + this._buildRunXml(run.text, run.style, false));
+        }
+        parts.push('    </w:p>');
+        return parts.join('\n');
+    },
+
+    /**
+     * Build a paragraph that is entirely deleted (wrap all runs in w:del).
+     */
+    _buildWholeParaDeletedXml(para, authorEsc, date) {
+        const parts = ['    <w:p>'];
+        const delIdMark = this._revId++;
+        const pPrXml = this._buildPPrXml(para && para.style, `<w:rPr><w:del w:id="${delIdMark}" w:author="${authorEsc}" w:date="${date}"/></w:rPr>`);
+        if (pPrXml) parts.push('      ' + pPrXml);
+        const delId = this._revId++;
+        parts.push(`      <w:del w:id="${delId}" w:author="${authorEsc}" w:date="${date}">`);
+        for (const run of this._runsFor(para)) {
+            parts.push('        ' + this._buildRunXml(run.text, run.style, true));
+        }
+        parts.push('      </w:del>');
+        parts.push('    </w:p>');
+        return parts.join('\n');
+    },
+
+    /**
+     * Build a paragraph that is entirely inserted (wrap all runs in w:ins).
+     */
+    _buildWholeParaInsertedXml(para, authorEsc, date) {
+        const parts = ['    <w:p>'];
+        const insIdMark = this._revId++;
+        const pPrXml = this._buildPPrXml(para && para.style, `<w:rPr><w:ins w:id="${insIdMark}" w:author="${authorEsc}" w:date="${date}"/></w:rPr>`);
+        if (pPrXml) parts.push('      ' + pPrXml);
+        const insId = this._revId++;
+        parts.push(`      <w:ins w:id="${insId}" w:author="${authorEsc}" w:date="${date}">`);
+        for (const run of this._runsFor(para)) {
+            parts.push('        ' + this._buildRunXml(run.text, run.style, false));
+        }
+        parts.push('      </w:ins>');
+        parts.push('    </w:p>');
+        return parts.join('\n');
+    },
+
+    /**
+     * Build XML for a modified paragraph with inline track changes.
+     * Splits each diff segment across the original runs so that the
+     * surviving formatting (font/size/bold/italic) is carried into the
+     * revision document.
+     */
+    _buildModifiedParaXml(changes, paraA, paraB, authorEsc, date) {
+        const parts = ['    <w:p>'];
+        const pPr = this._buildPPrXml((paraA && paraA.style) || (paraB && paraB.style));
+        if (pPr) parts.push('      ' + pPr);
+
+        const runsA = this._runsFor(paraA);
+        const runsB = this._runsFor(paraB);
+
+        let offsetA = 0;
+        let offsetB = 0;
 
         for (const change of changes) {
-            const text = this._escapeXml(change.value);
+            if (!change.value) continue;
+
             if (change.added) {
                 const id = this._revId++;
-                parts.push(`      <w:ins w:id="${id}" w:author="${this._escapeXml(author)}" w:date="${date}">
-        <w:r><w:t xml:space="preserve">${text}</w:t></w:r>
-      </w:ins>`);
+                const chunks = this._sliceRuns(runsB, offsetB, change.value.length, change.value);
+                parts.push(`      <w:ins w:id="${id}" w:author="${authorEsc}" w:date="${date}">`);
+                for (const chunk of chunks) {
+                    parts.push('        ' + this._buildRunXml(chunk.text, chunk.style, false));
+                }
+                parts.push('      </w:ins>');
+                offsetB += change.value.length;
             } else if (change.removed) {
                 const id = this._revId++;
-                parts.push(`      <w:del w:id="${id}" w:author="${this._escapeXml(author)}" w:date="${date}">
-        <w:r><w:delText xml:space="preserve">${text}</w:delText></w:r>
-      </w:del>`);
+                const chunks = this._sliceRuns(runsA, offsetA, change.value.length, change.value);
+                parts.push(`      <w:del w:id="${id}" w:author="${authorEsc}" w:date="${date}">`);
+                for (const chunk of chunks) {
+                    parts.push('        ' + this._buildRunXml(chunk.text, chunk.style, true));
+                }
+                parts.push('      </w:del>');
+                offsetA += change.value.length;
             } else {
-                parts.push(`      <w:r><w:t xml:space="preserve">${text}</w:t></w:r>`);
+                const chunks = this._sliceRuns(runsA, offsetA, change.value.length, change.value);
+                for (const chunk of chunks) {
+                    parts.push('      ' + this._buildRunXml(chunk.text, chunk.style, false));
+                }
+                offsetA += change.value.length;
+                offsetB += change.value.length;
             }
         }
 
         parts.push('    </w:p>');
         return parts.join('\n');
+    },
+
+    /**
+     * Return a usable runs array for a paragraph. Falls back to a synthetic
+     * run when the paragraph has no run data.
+     */
+    _runsFor(para) {
+        if (!para) return [{ text: '', style: {} }];
+        if (para.runs && para.runs.length > 0) {
+            return para.runs.filter(r => r.text && r.text.length > 0);
+        }
+        return [{ text: para.text || '', style: {} }];
+    },
+
+    /**
+     * Slice a [startOffset, startOffset + length) window out of the runs
+     * array. If the text actually living at that window does not match the
+     * expected segment (e.g. because diff was computed on a slightly
+     * different representation) we fall back to a single chunk using the
+     * style of the run at startOffset.
+     */
+    _sliceRuns(runs, startOffset, length, expectedText) {
+        const out = [];
+        if (!runs || runs.length === 0 || length <= 0) {
+            if (expectedText) out.push({ text: expectedText, style: {} });
+            return out;
+        }
+
+        let pos = 0;
+        let remaining = length;
+        let cursor = startOffset;
+        let produced = '';
+
+        for (const run of runs) {
+            if (remaining <= 0) break;
+            const runLen = run.text.length;
+            const runStart = pos;
+            const runEnd = pos + runLen;
+            pos = runEnd;
+            if (runEnd <= cursor) continue;
+
+            const localStart = Math.max(0, cursor - runStart);
+            const takeLen = Math.min(runLen - localStart, remaining);
+            if (takeLen <= 0) continue;
+
+            const chunkText = run.text.substr(localStart, takeLen);
+            produced += chunkText;
+            out.push({ text: chunkText, style: run.style || {} });
+            cursor += takeLen;
+            remaining -= takeLen;
+        }
+
+        // Fallback: if the produced text does not line up with the expected
+        // segment (which can happen when runs and the diff source strings
+        // diverged) emit the expected text verbatim with a best-guess style.
+        if (expectedText && produced !== expectedText) {
+            const style = (out[0] && out[0].style) ||
+                          (runs[0] && runs[0].style) || {};
+            return [{ text: expectedText, style }];
+        }
+
+        if (out.length === 0 && expectedText) {
+            out.push({ text: expectedText, style: {} });
+        }
+        return out;
+    },
+
+    /**
+     * Serialize paragraph properties (pPr) for the generated body.
+     * Accepts an optional extra XML fragment that is appended inside pPr.
+     */
+    _buildPPrXml(style, extra) {
+        const fragments = [];
+        if (style) {
+            if (style.alignment) {
+                const val = this._escapeXml(style.alignment);
+                fragments.push(`<w:jc w:val="${val}"/>`);
+            }
+        }
+        if (extra) fragments.push(extra);
+        if (fragments.length === 0) return '';
+        return `<w:pPr>${fragments.join('')}</w:pPr>`;
+    },
+
+    /**
+     * Build an inline <w:r> element with style-aware <w:rPr>.
+     */
+    _buildRunXml(text, style, asDelete) {
+        const rPr = this._buildRPrXml(style);
+        const body = this._escapeXml(text || '');
+        const textTag = asDelete ? 'w:delText' : 'w:t';
+        return `<w:r>${rPr}<${textTag} xml:space="preserve">${body}</${textTag}></w:r>`;
+    },
+
+    /**
+     * Build <w:rPr> for a given run style object.
+     */
+    _buildRPrXml(style) {
+        if (!style) return '';
+        const parts = [];
+        if (style.font) {
+            const f = this._escapeXml(style.font);
+            parts.push(`<w:rFonts w:ascii="${f}" w:eastAsia="${f}" w:hAnsi="${f}" w:cs="${f}"/>`);
+        }
+        if (style.bold) parts.push('<w:b/><w:bCs/>');
+        if (style.italic) parts.push('<w:i/><w:iCs/>');
+        if (style.underline) parts.push('<w:u w:val="single"/>');
+        if (style.fontSize) {
+            const sz = Math.max(2, parseInt(style.fontSize, 10));
+            parts.push(`<w:sz w:val="${sz}"/><w:szCs w:val="${sz}"/>`);
+        }
+        if (style.color) {
+            const c = this._escapeXml(String(style.color).replace(/^#/, ''));
+            parts.push(`<w:color w:val="${c}"/>`);
+        }
+        if (parts.length === 0) return '';
+        return `<w:rPr>${parts.join('')}</w:rPr>`;
     },
 
     /**

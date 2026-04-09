@@ -277,7 +277,9 @@ const Parsers = {
     // ==================== PDF Parser ====================
 
     /**
-     * Parse a PDF file, with OCR fallback for scanned documents
+     * Parse a PDF file, with OCR fallback for scanned documents.
+     * Extracts positional and font information so that the generated
+     * revision document can preserve the original visual formatting.
      * @param {File} file
      * @param {Function} onProgress
      * @returns {Promise<DocContent>}
@@ -303,45 +305,49 @@ const Parsers = {
         const paragraphs = [];
         let ocrUsed = false;
         let totalChars = 0;
+        let pageWidth = 612;
 
         for (let i = 1; i <= pageCount; i++) {
             onProgress && onProgress(`正在提取第 ${i}/${pageCount} 页文字...`);
             const page = await pdfDoc.getPage(i);
+            const viewport = page.getViewport({ scale: 1.0 });
+            if (i === 1) pageWidth = viewport.width;
+
             const textContent = await page.getTextContent();
 
-            // Extract text from text layer
-            let pageText = textContent.items.map(item => item.str).join('');
-
-            // Check if page is scanned (too few characters)
-            if (pageText.replace(/\s/g, '').length < 50) {
-                // Try OCR
+            // Quick scanned-page check
+            const rawText = textContent.items.map(it => it.str).join('');
+            if (rawText.replace(/\s/g, '').length < 50) {
                 onProgress && onProgress(`正在识别第 ${i}/${pageCount} 页（OCR）...`);
                 ocrUsed = true;
 
+                let ocrText = '';
                 try {
-                    const ocrText = await this._ocrPage(page, i, pageCount, onProgress);
-                    if (ocrText && ocrText.trim().length > 0) {
-                        pageText = ocrText;
-                    } else {
-                        pageText = `[第${i}页：该页图像质量过低，无法识别]`;
-                    }
+                    ocrText = await this._ocrPage(page, i, pageCount, onProgress);
                 } catch (e) {
-                    pageText = `[第${i}页：OCR识别失败 - ${e.message}]`;
+                    ocrText = `[第${i}页：OCR识别失败 - ${e.message}]`;
                 }
-            }
-
-            // Split into paragraphs by double newline or single newline
-            const pageParas = pageText.split(/\n\s*\n|\n/).filter(p => p.trim());
-            for (const pText of pageParas) {
-                const trimmed = pText.trim();
-                if (trimmed) {
+                if (!ocrText || !ocrText.trim()) {
+                    ocrText = `[第${i}页：该页图像质量过低，无法识别]`;
+                }
+                const ocrParas = ocrText.split(/\n\s*\n|\n/).map(s => s.trim()).filter(Boolean);
+                for (const pText of ocrParas) {
                     paragraphs.push({
-                        text: trimmed,
-                        runs: [{ text: trimmed, style: {} }],
+                        text: pText,
+                        runs: [{ text: pText, style: {} }],
                         style: {}
                     });
-                    totalChars += trimmed.length;
+                    totalChars += pText.length;
                 }
+                continue;
+            }
+
+            // Build styled lines from the text items, then group into paragraphs
+            const lines = this._extractPdfLines(textContent, viewport);
+            const pageParas = this._groupPdfLinesIntoParagraphs(lines, viewport);
+            for (const para of pageParas) {
+                paragraphs.push(para);
+                totalChars += para.text.length;
             }
         }
 
@@ -356,9 +362,243 @@ const Parsers = {
                 sourceFormat: 'pdf',
                 charCount: totalChars,
                 pageCount,
-                ocrUsed
+                ocrUsed,
+                pageWidth
             }
         };
+    },
+
+    /**
+     * Extract lines with font info from a PDF page's text content.
+     * Each returned line has: {y, x, maxFontSize, text, runs, centered}
+     */
+    _extractPdfLines(textContent, viewport) {
+        const items = textContent.items || [];
+        const styles = textContent.styles || {};
+        if (items.length === 0) return [];
+
+        // Normalize items with position, size, font, bold, italic
+        const normalized = [];
+        for (const item of items) {
+            if (!item.str) continue;
+            const tx = item.transform || [1, 0, 0, 1, 0, 0];
+            const fontSize = Math.hypot(tx[2], tx[3]) || Math.hypot(tx[0], tx[1]) || 12;
+            const x = tx[4];
+            const y = tx[5];
+            const styleInfo = styles[item.fontName] || {};
+            const fontFamily = (styleInfo.fontFamily || '').replace(/^"|"$/g, '') || '';
+            const combinedName = (fontFamily + ' ' + (item.fontName || '')).toLowerCase();
+            const bold = /bold|heavy|black|semibold|demibold/.test(combinedName);
+            const italic = /italic|oblique/.test(combinedName);
+            normalized.push({
+                str: item.str,
+                x, y,
+                width: item.width || 0,
+                height: item.height || fontSize,
+                fontSize,
+                fontFamily: this._cleanFontFamily(fontFamily),
+                bold, italic
+            });
+        }
+
+        if (normalized.length === 0) return [];
+
+        // Group items into lines by Y coordinate (tolerance depends on font size)
+        const sorted = normalized.slice().sort((a, b) => {
+            if (Math.abs(a.y - b.y) > 1) return b.y - a.y;
+            return a.x - b.x;
+        });
+
+        const lineBuckets = [];
+        for (const it of sorted) {
+            const tol = Math.max(2, it.fontSize * 0.35);
+            let attached = false;
+            for (const bucket of lineBuckets) {
+                if (Math.abs(bucket.y - it.y) <= tol) {
+                    bucket.items.push(it);
+                    // Weighted average y
+                    bucket.y = (bucket.y * (bucket.items.length - 1) + it.y) / bucket.items.length;
+                    attached = true;
+                    break;
+                }
+            }
+            if (!attached) lineBuckets.push({ y: it.y, items: [it] });
+        }
+
+        lineBuckets.sort((a, b) => b.y - a.y);
+
+        const lines = [];
+        for (const bucket of lineBuckets) {
+            bucket.items.sort((a, b) => a.x - b.x);
+
+            const runs = [];
+            let lineText = '';
+            let prev = null;
+            let minX = Infinity, maxX = -Infinity, maxFontSize = 0;
+
+            for (const it of bucket.items) {
+                if (!it.str) continue;
+
+                // Insert a space between items when there is a visible horizontal gap
+                if (prev) {
+                    const prevEnd = prev.x + prev.width;
+                    const gap = it.x - prevEnd;
+                    const spaceW = Math.max(prev.fontSize, it.fontSize) * 0.25;
+                    const endsWithSpace = /\s$/.test(lineText);
+                    const startsWithSpace = /^\s/.test(it.str);
+                    if (gap > spaceW && !endsWithSpace && !startsWithSpace) {
+                        this._appendToRuns(runs, ' ', prev);
+                        lineText += ' ';
+                    }
+                }
+
+                this._appendToRuns(runs, it.str, it);
+                lineText += it.str;
+                minX = Math.min(minX, it.x);
+                maxX = Math.max(maxX, it.x + it.width);
+                maxFontSize = Math.max(maxFontSize, it.fontSize);
+                prev = it;
+            }
+
+            if (!lineText.trim()) continue;
+
+            // Decide alignment by looking at left/right margins
+            const leftMargin = minX;
+            const rightMargin = viewport.width - maxX;
+            const marginDiff = Math.abs(leftMargin - rightMargin);
+            const centered = marginDiff < 20 && leftMargin > 40;
+
+            lines.push({
+                y: bucket.y,
+                x: minX,
+                right: maxX,
+                maxFontSize,
+                text: lineText,
+                runs,
+                centered
+            });
+        }
+
+        return lines;
+    },
+
+    _cleanFontFamily(name) {
+        if (!name) return '';
+        // Strip subset prefixes like "ABCDEF+FontName"
+        const m = name.match(/^[A-Z]{6}\+(.+)$/);
+        if (m) name = m[1];
+        // Strip style suffixes commonly included in font family names
+        return name.replace(/[,\-](Bold|Italic|Oblique|Regular|Light|Medium|Semibold|Demibold|Heavy|Black)(Italic|Oblique)?$/i, '').trim();
+    },
+
+    _appendToRuns(runs, text, item) {
+        const style = {
+            fontSize: Math.max(1, Math.round(item.fontSize * 2)), // half-points
+            font: item.fontFamily || '',
+            bold: !!item.bold,
+            italic: !!item.italic
+        };
+        const last = runs[runs.length - 1];
+        if (last &&
+            last.style.fontSize === style.fontSize &&
+            last.style.font === style.font &&
+            last.style.bold === style.bold &&
+            last.style.italic === style.italic) {
+            last.text += text;
+        } else {
+            runs.push({ text, style });
+        }
+    },
+
+    /**
+     * Group consecutive lines into paragraphs based on vertical spacing
+     * and indentation changes.
+     */
+    _groupPdfLinesIntoParagraphs(lines, viewport) {
+        const paragraphs = [];
+        if (lines.length === 0) return paragraphs;
+
+        let current = null;
+        let prevLine = null;
+
+        const isCJK = (ch) => {
+            if (!ch) return false;
+            const c = ch.charCodeAt(0);
+            return (c >= 0x4E00 && c <= 0x9FFF) ||
+                   (c >= 0x3400 && c <= 0x4DBF) ||
+                   (c >= 0x3000 && c <= 0x303F) ||
+                   (c >= 0xFF00 && c <= 0xFFEF);
+        };
+
+        const flush = () => {
+            if (current && current.text.trim()) {
+                paragraphs.push(current);
+            }
+            current = null;
+        };
+
+        for (const line of lines) {
+            let newPara = false;
+            if (!current) {
+                newPara = true;
+            } else if (prevLine) {
+                const gap = prevLine.y - line.y;
+                const expected = Math.max(prevLine.maxFontSize, line.maxFontSize) * 1.15;
+                if (gap > expected * 1.55) newPara = true;
+                // Indentation change suggests a new paragraph
+                if (Math.abs(line.x - prevLine.x) > prevLine.maxFontSize * 1.2) newPara = true;
+                // Font size change (heading boundary)
+                if (Math.abs(line.maxFontSize - prevLine.maxFontSize) > 1.5) newPara = true;
+                // Previous line ends with a sentence terminator
+                const lastCh = prevLine.text.trim().slice(-1);
+                if (/[。？！\.\?!]/.test(lastCh) && gap > expected * 0.9) newPara = true;
+            }
+
+            if (newPara) {
+                flush();
+                current = {
+                    text: '',
+                    runs: [],
+                    style: {
+                        alignment: line.centered ? 'center' : null,
+                        fontSize: Math.max(1, Math.round(line.maxFontSize * 2))
+                    }
+                };
+            }
+
+            // Join line text to current paragraph.
+            // For CJK-to-CJK boundaries we do not insert a space.
+            if (current.text) {
+                const lastCh = current.text.slice(-1);
+                const firstCh = line.text.charAt(0);
+                const joinWithSpace = !(isCJK(lastCh) || isCJK(firstCh));
+                if (joinWithSpace && !/\s$/.test(current.text) && !/^\s/.test(line.text)) {
+                    // Append a space to the last run
+                    if (current.runs.length > 0) {
+                        current.runs[current.runs.length - 1].text += ' ';
+                    }
+                    current.text += ' ';
+                }
+            }
+
+            current.text += line.text;
+            for (const run of line.runs) {
+                const last = current.runs[current.runs.length - 1];
+                if (last &&
+                    last.style.fontSize === run.style.fontSize &&
+                    last.style.font === run.style.font &&
+                    last.style.bold === run.style.bold &&
+                    last.style.italic === run.style.italic) {
+                    last.text += run.text;
+                } else {
+                    current.runs.push({ text: run.text, style: { ...run.style } });
+                }
+            }
+            prevLine = line;
+        }
+
+        flush();
+        return paragraphs;
     },
 
     /**

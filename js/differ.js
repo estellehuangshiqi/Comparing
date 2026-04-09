@@ -54,52 +54,22 @@ const Differ = {
                         changes: null
                     });
                 } else {
-                    // Calculate change ratio to decide display strategy
-                    // If most of the text is changed, it's cleaner to show as delete+insert
-                    let changedLen = 0, totalLen = 0;
+                    // ALWAYS show character/word-level diff. Never split a
+                    // modified pair into whole-paragraph delete+insert, even
+                    // when the change ratio is high: the user explicitly
+                    // rejects "whole paragraph" revisions.
+                    diffs.push({
+                        type: 'modified',
+                        paraA: item.paraA,
+                        paraB: item.paraB,
+                        indexA: item.indexA,
+                        indexB: item.indexB,
+                        changes
+                    });
+                    modCount++;
                     for (const c of changes) {
-                        totalLen += c.value.length;
-                        if (c.added || c.removed) changedLen += c.value.length;
-                    }
-                    const changeRatio = totalLen > 0 ? changedLen / totalLen : 0;
-
-                    if (changeRatio > 0.6) {
-                        // Too many changes - split into delete + insert for minimal display
-                        diffs.push({
-                            type: 'deleted',
-                            paraA: item.paraA,
-                            paraB: null,
-                            indexA: item.indexA,
-                            indexB: -1,
-                            changes: null
-                        });
-                        diffs.push({
-                            type: 'inserted',
-                            paraA: null,
-                            paraB: item.paraB,
-                            indexA: -1,
-                            indexB: item.indexB,
-                            changes: null
-                        });
-                        delCount++;
-                        insCount++;
-                        delChars += item.paraA.text.length;
-                        insChars += item.paraB.text.length;
-                    } else {
-                        // Genuine inline modification - show character-level diff
-                        diffs.push({
-                            type: 'modified',
-                            paraA: item.paraA,
-                            paraB: item.paraB,
-                            indexA: item.indexA,
-                            indexB: item.indexB,
-                            changes
-                        });
-                        modCount++;
-                        for (const c of changes) {
-                            if (c.added) insChars += c.value.length;
-                            if (c.removed) delChars += c.value.length;
-                        }
+                        if (c.added) insChars += c.value.length;
+                        if (c.removed) delChars += c.value.length;
                     }
                 }
             } else if (item.type === 'deleted') {
@@ -172,8 +142,10 @@ const Differ = {
         }
 
         // Dynamic programming: find optimal alignment maximizing total similarity
-        // Only pair paragraphs with similarity >= MATCH_THRESHOLD
-        const MATCH_THRESHOLD = 0.5;
+        // Only pair paragraphs with similarity >= MATCH_THRESHOLD.
+        // A lower threshold keeps minor-edit pairs bound together instead of
+        // being torn into whole-paragraph delete+insert pairs.
+        const MATCH_THRESHOLD = 0.35;
         const dp = Array.from({ length: n + 1 }, () => new Float64Array(m + 1));
         const trace = Array.from({ length: n + 1 }, () => new Int8Array(m + 1));
 

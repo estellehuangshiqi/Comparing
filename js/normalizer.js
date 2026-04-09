@@ -42,24 +42,29 @@ const Normalizer = {
         // Remove invisible characters
         result = result.replace(this.invisibleChars, '');
 
-        // Unify line breaks
+        // Unify line breaks and collapse them with other whitespace.
+        // PDF extraction frequently introduces extra line breaks / soft
+        // hyphens within the same logical paragraph, so we should not
+        // treat those as content differences.
         result = result.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        // Remove soft-hyphen + line-break artefacts from PDFs
+        result = result.replace(/\u00AD\n?/g, '');
 
         // Full-width to half-width
         result = result.split('').map(ch => this.fullToHalf[ch] || ch).join('');
 
-        // Normalize whitespace: collapse multiple spaces/tabs into one
-        result = result.replace(/[ \t]+/g, ' ');
+        // Collapse all whitespace (space, tab, newline) to a single space
+        result = result.replace(/\s+/g, ' ');
 
-        // Trim spaces around CJK characters
-        result = result.replace(/ ?([\u4e00-\u9fff\u3000-\u303f]) ?/g, '$1');
+        // Trim spaces around CJK characters (PDF readers often insert them)
+        result = result.replace(/ ?([\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]) ?/g, '$1');
 
         // Normalize consecutive punctuation
         result = result.replace(/。{2,}/g, '……');
         result = result.replace(/\.{3,}/g, '…');
         result = result.replace(/…{2,}/g, '……');
 
-        return result;
+        return result.trim();
     },
 
     /**
