@@ -115,26 +115,38 @@ const Generator = {
 
         const wNS = this.W_NS;
 
-        // Collect all existing runs and their text
-        const existingRuns = [];
+        // Collect all content-bearing children: direct runs plus runs nested
+        // inside hyperlinks/smartTag/etc. We must strip every container that
+        // carries the original text, otherwise the output duplicates content.
+        const removables = [];
+        const firstRuns = [];
         for (const child of Array.from(paraElem.children)) {
-            if (child.localName === 'r' && child.namespaceURI === wNS) {
-                existingRuns.push(child);
+            if (child.namespaceURI !== wNS) continue;
+            const local = child.localName;
+            if (local === 'r') {
+                removables.push(child);
+                firstRuns.push(child);
+            } else if (local === 'hyperlink' || local === 'smartTag' || local === 'sdt' ||
+                       local === 'ins' || local === 'del') {
+                // These wrap runs — remove them entirely along with their content.
+                removables.push(child);
+                const nested = child.getElementsByTagNameNS(wNS, 'r');
+                if (nested.length > 0) firstRuns.push(nested[0]);
             }
         }
 
         // Get the run properties from the first run (to preserve formatting)
         let templateRPr = null;
-        if (existingRuns.length > 0) {
-            const rPr = existingRuns[0].getElementsByTagNameNS(wNS, 'rPr')[0];
+        if (firstRuns.length > 0) {
+            const rPr = firstRuns[0].getElementsByTagNameNS(wNS, 'rPr')[0];
             if (rPr) {
                 templateRPr = rPr.cloneNode(true);
             }
         }
 
-        // Remove all existing runs from paragraph
-        for (const run of existingRuns) {
-            paraElem.removeChild(run);
+        // Remove all existing content-bearing children from paragraph
+        for (const node of removables) {
+            if (node.parentNode === paraElem) paraElem.removeChild(node);
         }
 
         // Build new content from changes

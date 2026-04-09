@@ -309,8 +309,20 @@ const Parsers = {
             const page = await pdfDoc.getPage(i);
             const textContent = await page.getTextContent();
 
-            // Extract text from text layer
-            let pageText = textContent.items.map(item => item.str).join('');
+            // Extract text from text layer, reconstructing line breaks.
+            // pdf.js emits text items without inherent separators, so we
+            // detect newlines via hasEOL flag and y-coordinate changes.
+            let pageText = '';
+            let lastY = null;
+            for (const item of textContent.items) {
+                const y = (item.transform && item.transform.length >= 6) ? item.transform[5] : null;
+                if (lastY !== null && y !== null && Math.abs(y - lastY) > 1) {
+                    if (!pageText.endsWith('\n')) pageText += '\n';
+                }
+                pageText += item.str;
+                if (item.hasEOL && !pageText.endsWith('\n')) pageText += '\n';
+                if (y !== null) lastY = y;
+            }
 
             // Check if page is scanned (too few characters)
             if (pageText.replace(/\s/g, '').length < 50) {

@@ -225,13 +225,15 @@ const Differ = {
                 result.unshift({
                     type: 'deleted',
                     paraA: parasA[i - 1],
-                    indexA: i - 1
+                    indexA: i - 1,
+                    indexB: -1
                 });
                 i--;
             } else {
                 result.unshift({
                     type: 'inserted',
                     paraB: parasB[j - 1],
+                    indexA: -1,
                     indexB: j - 1
                 });
                 j--;
@@ -435,9 +437,9 @@ const Differ = {
                 }
                 tokens.push(ws);
             } else if (/[a-zA-Z0-9]/.test(text[i])) {
-                // Latin word
+                // Latin word (include ASCII apostrophe, smart quotes, hyphen)
                 let word = '';
-                while (i < text.length && /[a-zA-Z0-9''\-]/.test(text[i])) {
+                while (i < text.length && /[a-zA-Z0-9'\u2018\u2019\-]/.test(text[i])) {
                     word += text[i];
                     i++;
                 }

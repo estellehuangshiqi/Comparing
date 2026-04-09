@@ -167,6 +167,11 @@
     function showPreview(docAContent, docBContent, diffResult) {
         previewSection.style.display = '';
 
+        // Clear any warning elements left from previous comparisons
+        for (const old of previewSection.querySelectorAll('.preview-warning')) {
+            old.remove();
+        }
+
         // Stats bar
         const s = diffResult.stats;
         statsBar.innerHTML = `
@@ -227,6 +232,7 @@
         // Warning
         if (diffResult.warning) {
             const warn = document.createElement('div');
+            warn.className = 'preview-warning';
             warn.style.cssText = 'padding:10px;background:#fdf6ec;border:1px solid #e6a23c;border-radius:4px;color:#e6a23c;margin-top:12px;font-size:13px;';
             warn.textContent = '⚠ ' + diffResult.warning;
             previewSection.appendChild(warn);
