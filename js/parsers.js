@@ -277,6 +277,64 @@ const Parsers = {
     // ==================== PDF Parser ====================
 
     /**
+     * Extract run-level style (font, size, bold, italic) from a pdf.js text item.
+     * pdf.js exposes a per-page `styles` map keyed by item.fontName whose entries
+     * contain the real fontFamily. Bold/italic are detected heuristically from the
+     * combined font name because pdf.js does not flag them directly.
+     */
+    _pdfItemStyle(item, pdfStyles) {
+        const fontKey = item.fontName || '';
+        const info = pdfStyles[fontKey] || {};
+        const family = info.fontFamily || '';
+        const combined = `${family} ${fontKey}`;
+
+        const bold = /bold|black|heavy|semibold|demibold/i.test(combined);
+        const italic = /italic|oblique/i.test(combined);
+
+        // item.height is the rendered height in page units ≈ font size in points.
+        // Fall back to |transform[3]| for rotated/scaled text.
+        let sizePt = item.height;
+        if (!sizePt && item.transform && item.transform.length >= 4) {
+            sizePt = Math.abs(item.transform[3]);
+        }
+        if (!sizePt || !isFinite(sizePt) || sizePt <= 0) sizePt = 10.5;
+
+        const style = {
+            font: this._cleanPdfFontName(family) || undefined,
+            fontSize: Math.max(2, Math.round(sizePt * 2)) // DOCX uses half-points
+        };
+        if (bold) style.bold = true;
+        if (italic) style.italic = true;
+        return style;
+    },
+
+    /**
+     * Strip the 6-char subset prefix ("ABCDEF+") and trailing descriptors from
+     * a raw PDF font family name so we end up with something Word can resolve.
+     */
+    _cleanPdfFontName(name) {
+        if (!name) return '';
+        return String(name)
+            .replace(/^[A-Z]{6}\+/, '')
+            .replace(/[,;].*$/, '')
+            .replace(/-?(Bold|Italic|Oblique|Regular|Light|Medium|Semibold|Heavy|Black)+$/i, '')
+            .trim();
+    },
+
+    /**
+     * True iff two run-style objects would render identically in Word.
+     */
+    _sameRunStyle(a, b) {
+        if (a === b) return true;
+        if (!a || !b) return false;
+        return a.font === b.font &&
+               a.fontSize === b.fontSize &&
+               !!a.bold === !!b.bold &&
+               !!a.italic === !!b.italic &&
+               !!a.underline === !!b.underline;
+    },
+
+    /**
      * Parse a PDF file, with OCR fallback for scanned documents
      * @param {File} file
      * @param {Function} onProgress
@@ -308,45 +366,63 @@ const Parsers = {
             onProgress && onProgress(`正在提取第 ${i}/${pageCount} 页文字...`);
             const page = await pdfDoc.getPage(i);
             const textContent = await page.getTextContent();
+            const pdfStyles = textContent.styles || {};
 
-            // Extract text from text layer, reconstructing line breaks.
-            // pdf.js emits text items without inherent separators, so we
-            // detect newlines via hasEOL flag and y-coordinate changes.
-            let pageText = '';
+            // Group text items into visual lines using y-coordinate / hasEOL.
+            // Each item carries its own font + size; we capture that as run style
+            // so the output DOCX can reproduce the original formatting closely.
+            const lines = [];
+            let currentLine = null;
             let lastY = null;
+            let forceNewLine = false;
+
             for (const item of textContent.items) {
+                if (item.str === undefined || item.str === null) continue;
                 const y = (item.transform && item.transform.length >= 6) ? item.transform[5] : null;
-                if (lastY !== null && y !== null && Math.abs(y - lastY) > 1) {
-                    if (!pageText.endsWith('\n')) pageText += '\n';
+
+                const needNewLine =
+                    currentLine === null ||
+                    forceNewLine ||
+                    (lastY !== null && y !== null && Math.abs(y - lastY) > 1);
+
+                if (needNewLine) {
+                    currentLine = { runs: [] };
+                    lines.push(currentLine);
+                    forceNewLine = false;
                 }
-                pageText += item.str;
-                if (item.hasEOL && !pageText.endsWith('\n')) pageText += '\n';
+
+                if (item.str !== '') {
+                    const runStyle = this._pdfItemStyle(item, pdfStyles);
+                    currentLine.runs.push({ text: item.str, style: runStyle });
+                }
+
                 if (y !== null) lastY = y;
+                if (item.hasEOL) forceNewLine = true;
             }
 
-            // Check if page is scanned (too few characters)
-            if (pageText.replace(/\s/g, '').length < 50) {
-                // Try OCR
+            // Check if page is scanned (no extractable text layer)
+            const plainText = lines
+                .map(l => l.runs.map(r => r.text).join(''))
+                .join('\n');
+
+            if (plainText.replace(/\s/g, '').length < 50) {
                 onProgress && onProgress(`正在识别第 ${i}/${pageCount} 页（OCR）...`);
                 ocrUsed = true;
 
+                let ocrText = '';
                 try {
-                    const ocrText = await this._ocrPage(page, i, pageCount, onProgress);
-                    if (ocrText && ocrText.trim().length > 0) {
-                        pageText = ocrText;
-                    } else {
-                        pageText = `[第${i}页：该页图像质量过低，无法识别]`;
-                    }
+                    ocrText = await this._ocrPage(page, i, pageCount, onProgress);
                 } catch (e) {
-                    pageText = `[第${i}页：OCR识别失败 - ${e.message}]`;
+                    ocrText = `[第${i}页：OCR识别失败 - ${e.message}]`;
                 }
-            }
+                if (!ocrText || !ocrText.trim()) {
+                    ocrText = `[第${i}页：该页图像质量过低，无法识别]`;
+                }
 
-            // Split into paragraphs by double newline or single newline
-            const pageParas = pageText.split(/\n\s*\n|\n/).filter(p => p.trim());
-            for (const pText of pageParas) {
-                const trimmed = pText.trim();
-                if (trimmed) {
+                // OCR returns plain text only — one paragraph per line, default style
+                for (const rawLine of ocrText.split(/\n/)) {
+                    const trimmed = rawLine.trim();
+                    if (!trimmed) continue;
                     paragraphs.push({
                         text: trimmed,
                         runs: [{ text: trimmed, style: {} }],
@@ -354,6 +430,34 @@ const Parsers = {
                     });
                     totalChars += trimmed.length;
                 }
+                continue;
+            }
+
+            // Build paragraphs from collected lines. Adjacent runs on the same
+            // line that share identical style are merged to minimize run count.
+            for (const line of lines) {
+                if (!line.runs.length) continue;
+
+                const merged = [];
+                for (const run of line.runs) {
+                    const prev = merged[merged.length - 1];
+                    if (prev && this._sameRunStyle(prev.style, run.style)) {
+                        prev.text += run.text;
+                    } else {
+                        merged.push({ text: run.text, style: { ...run.style } });
+                    }
+                }
+
+                const lineText = merged.map(r => r.text).join('');
+                const trimmed = lineText.trim();
+                if (!trimmed) continue;
+
+                paragraphs.push({
+                    text: trimmed,
+                    runs: merged,
+                    style: {}
+                });
+                totalChars += trimmed.length;
             }
         }
 

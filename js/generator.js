@@ -376,22 +376,31 @@ const Generator = {
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
 </Relationships>`);
 
-        // word/styles.xml
+        // word/styles.xml — tight defaults so PDF-derived paragraphs
+        // reproduce their original line spacing rather than being padded.
         zip.file('word/styles.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults>
+    <w:rPrDefault>
+      <w:rPr><w:rFonts w:ascii="等线" w:eastAsia="等线" w:hAnsi="等线" w:cs="Times New Roman"/><w:sz w:val="21"/><w:szCs w:val="22"/></w:rPr>
+    </w:rPrDefault>
+    <w:pPrDefault>
+      <w:pPr><w:spacing w:after="0" w:line="276" w:lineRule="auto"/></w:pPr>
+    </w:pPrDefault>
+  </w:docDefaults>
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
     <w:name w:val="Normal"/>
-    <w:pPr><w:spacing w:after="200" w:line="276" w:lineRule="auto"/></w:pPr>
+    <w:pPr><w:spacing w:after="0" w:line="276" w:lineRule="auto"/></w:pPr>
     <w:rPr><w:rFonts w:ascii="等线" w:eastAsia="等线" w:hAnsi="等线"/><w:sz w:val="21"/></w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="Heading1">
     <w:name w:val="heading 1"/>
-    <w:pPr><w:spacing w:before="480"/></w:pPr>
+    <w:pPr><w:spacing w:before="480" w:after="120"/></w:pPr>
     <w:rPr><w:b/><w:sz w:val="36"/></w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="Heading2">
     <w:name w:val="heading 2"/>
-    <w:pPr><w:spacing w:before="200"/></w:pPr>
+    <w:pPr><w:spacing w:before="200" w:after="80"/></w:pPr>
     <w:rPr><w:b/><w:sz w:val="28"/></w:rPr>
   </w:style>
 </w:styles>`);
@@ -430,39 +439,43 @@ ${bodyContent}
 
     /**
      * Build the body XML content from diff results (for new DOCX generation).
+     * Preserves per-run style (font, size, bold, italic) captured by parsers.
      */
     _buildBodyXml(diffResult, author, date) {
         const lines = [];
+        const authorXml = this._escapeXml(author);
 
         for (const diff of diffResult.diffs) {
             if (diff.type === 'equal') {
-                // Unchanged paragraph
-                const text = this._escapeXml(diff.paraA.text);
-                lines.push(`    <w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`);
+                const runs = this._runsXml(this._resolveRuns(diff.paraA));
+                lines.push(`    <w:p>${runs}</w:p>`);
             } else if (diff.type === 'modified') {
-                // Modified paragraph - inline track changes
-                lines.push(this._buildModifiedParaXml(diff.changes, author, date));
+                // Use the first run of the ORIGINAL paragraph as the style template
+                // for every diff fragment. This preserves font/size/bold/italic
+                // from the source PDF while keeping track-change markup simple.
+                const template = this._firstRunStyle(diff.paraA) || this._firstRunStyle(diff.paraB);
+                lines.push(this._buildModifiedParaXml(diff.changes, author, date, template));
             } else if (diff.type === 'deleted') {
-                // Entire paragraph deleted
-                const text = this._escapeXml(diff.paraA.text);
+                const runs = this._resolveRuns(diff.paraA);
                 const id1 = this._revId++;
                 const id2 = this._revId++;
+                const body = runs
+                    .map(r => `<w:r>${this._rPrXml(r.style)}<w:delText xml:space="preserve">${this._escapeXml(r.text)}</w:delText></w:r>`)
+                    .join('');
                 lines.push(`    <w:p>
-      <w:pPr><w:rPr><w:del w:id="${id1}" w:author="${this._escapeXml(author)}" w:date="${date}"/></w:rPr></w:pPr>
-      <w:del w:id="${id2}" w:author="${this._escapeXml(author)}" w:date="${date}">
-        <w:r><w:delText xml:space="preserve">${text}</w:delText></w:r>
-      </w:del>
+      <w:pPr><w:rPr><w:del w:id="${id1}" w:author="${authorXml}" w:date="${date}"/></w:rPr></w:pPr>
+      <w:del w:id="${id2}" w:author="${authorXml}" w:date="${date}">${body}</w:del>
     </w:p>`);
             } else if (diff.type === 'inserted') {
-                // Entire paragraph inserted
-                const text = this._escapeXml(diff.paraB.text);
+                const runs = this._resolveRuns(diff.paraB);
                 const id1 = this._revId++;
                 const id2 = this._revId++;
+                const body = runs
+                    .map(r => `<w:r>${this._rPrXml(r.style)}<w:t xml:space="preserve">${this._escapeXml(r.text)}</w:t></w:r>`)
+                    .join('');
                 lines.push(`    <w:p>
-      <w:pPr><w:rPr><w:ins w:id="${id1}" w:author="${this._escapeXml(author)}" w:date="${date}"/></w:rPr></w:pPr>
-      <w:ins w:id="${id2}" w:author="${this._escapeXml(author)}" w:date="${date}">
-        <w:r><w:t xml:space="preserve">${text}</w:t></w:r>
-      </w:ins>
+      <w:pPr><w:rPr><w:ins w:id="${id1}" w:author="${authorXml}" w:date="${date}"/></w:rPr></w:pPr>
+      <w:ins w:id="${id2}" w:author="${authorXml}" w:date="${date}">${body}</w:ins>
     </w:p>`);
             }
         }
@@ -472,29 +485,85 @@ ${bodyContent}
 
     /**
      * Build XML for a modified paragraph with inline track changes.
+     * @param templateStyle - run style used for every fragment (preserves font)
      */
-    _buildModifiedParaXml(changes, author, date) {
+    _buildModifiedParaXml(changes, author, date, templateStyle) {
         const parts = ['    <w:p>'];
+        const authorXml = this._escapeXml(author);
+        const rPr = this._rPrXml(templateStyle);
 
         for (const change of changes) {
             const text = this._escapeXml(change.value);
             if (change.added) {
                 const id = this._revId++;
-                parts.push(`      <w:ins w:id="${id}" w:author="${this._escapeXml(author)}" w:date="${date}">
-        <w:r><w:t xml:space="preserve">${text}</w:t></w:r>
-      </w:ins>`);
+                parts.push(`      <w:ins w:id="${id}" w:author="${authorXml}" w:date="${date}"><w:r>${rPr}<w:t xml:space="preserve">${text}</w:t></w:r></w:ins>`);
             } else if (change.removed) {
                 const id = this._revId++;
-                parts.push(`      <w:del w:id="${id}" w:author="${this._escapeXml(author)}" w:date="${date}">
-        <w:r><w:delText xml:space="preserve">${text}</w:delText></w:r>
-      </w:del>`);
+                parts.push(`      <w:del w:id="${id}" w:author="${authorXml}" w:date="${date}"><w:r>${rPr}<w:delText xml:space="preserve">${text}</w:delText></w:r></w:del>`);
             } else {
-                parts.push(`      <w:r><w:t xml:space="preserve">${text}</w:t></w:r>`);
+                parts.push(`      <w:r>${rPr}<w:t xml:space="preserve">${text}</w:t></w:r>`);
             }
         }
 
         parts.push('    </w:p>');
         return parts.join('\n');
+    },
+
+    /**
+     * Return a paragraph's runs, or fall back to a single run synthesized from
+     * paragraph.text when no runs are present (e.g. legacy callers).
+     */
+    _resolveRuns(para) {
+        if (!para) return [{ text: '', style: {} }];
+        if (Array.isArray(para.runs) && para.runs.length > 0) {
+            return para.runs.filter(r => r && r.text !== undefined && r.text !== null);
+        }
+        return [{ text: para.text || '', style: para.style || {} }];
+    },
+
+    /**
+     * Render an array of runs as concatenated <w:r> XML.
+     */
+    _runsXml(runs) {
+        return runs
+            .map(r => `<w:r>${this._rPrXml(r.style)}<w:t xml:space="preserve">${this._escapeXml(r.text)}</w:t></w:r>`)
+            .join('');
+    },
+
+    /**
+     * Return the style of a paragraph's first non-empty run, or null.
+     */
+    _firstRunStyle(para) {
+        if (!para || !Array.isArray(para.runs)) return null;
+        for (const r of para.runs) {
+            if (r && r.text) return r.style || {};
+        }
+        return para.runs[0] ? (para.runs[0].style || {}) : null;
+    },
+
+    /**
+     * Build a <w:rPr> fragment from a run-style object. Returns '' if no style.
+     */
+    _rPrXml(style) {
+        if (!style) return '';
+        const parts = [];
+        if (style.bold) parts.push('<w:b/>');
+        if (style.italic) parts.push('<w:i/>');
+        if (style.underline) parts.push('<w:u w:val="single"/>');
+        if (style.fontSize) {
+            const sz = this._escapeXml(String(Math.max(2, Math.round(style.fontSize))));
+            parts.push(`<w:sz w:val="${sz}"/>`);
+            parts.push(`<w:szCs w:val="${sz}"/>`);
+        }
+        if (style.font) {
+            const f = this._escapeXml(style.font);
+            parts.push(`<w:rFonts w:ascii="${f}" w:hAnsi="${f}" w:eastAsia="${f}" w:cs="${f}"/>`);
+        }
+        if (style.color && /^[0-9A-Fa-f]{6}$/.test(style.color)) {
+            parts.push(`<w:color w:val="${style.color}"/>`);
+        }
+        if (!parts.length) return '';
+        return `<w:rPr>${parts.join('')}</w:rPr>`;
     },
 
     /**
