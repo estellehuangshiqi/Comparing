@@ -90,6 +90,18 @@ const Generator = {
             }
         }
 
+        // Apply target formatting to every paragraph in the body:
+        // 宋体 + Times New Roman, 小四 (12pt), 单倍行距, 段后 1.5 行, 两端对齐.
+        const allParas = [];
+        for (const child of body.children) {
+            if (child.localName === 'p' && child.namespaceURI === this.W_NS) {
+                allParas.push(child);
+            }
+        }
+        for (const para of allParas) {
+            this._applyParaFormatting(xmlDoc, para);
+        }
+
         // Serialize back to string
         const serializer = new XMLSerializer();
         const newXmlStr = serializer.serializeToString(xmlDoc);
@@ -332,6 +344,123 @@ const Generator = {
         }
     },
 
+    /**
+     * Apply target formatting (宋体 + Times New Roman, 小四, 单倍行距,
+     * 段后 1.5 行, 两端对齐) to a paragraph element. Overrides existing
+     * font / size / spacing / alignment but preserves other formatting
+     * such as bold, italic, color, etc.
+     */
+    _applyParaFormatting(xmlDoc, paraElem) {
+        const wNS = this.W_NS;
+
+        // Ensure pPr exists as the first child of the paragraph.
+        let pPr = null;
+        for (const child of paraElem.children) {
+            if (child.localName === 'pPr' && child.namespaceURI === wNS) {
+                pPr = child;
+                break;
+            }
+        }
+        if (!pPr) {
+            pPr = xmlDoc.createElementNS(wNS, 'w:pPr');
+            paraElem.insertBefore(pPr, paraElem.firstChild);
+        }
+
+        // Remove conflicting spacing and jc entries (direct children of pPr only).
+        for (const child of Array.from(pPr.children)) {
+            if (child.namespaceURI === wNS &&
+                (child.localName === 'spacing' || child.localName === 'jc')) {
+                pPr.removeChild(child);
+            }
+        }
+
+        // Add spacing: single line (240 twips with auto rule) and 段后 1.5 行.
+        const spacing = xmlDoc.createElementNS(wNS, 'w:spacing');
+        spacing.setAttribute('w:after', '360');
+        spacing.setAttribute('w:afterLines', '150');
+        spacing.setAttribute('w:line', '240');
+        spacing.setAttribute('w:lineRule', 'auto');
+
+        // Justified alignment (两端对齐).
+        const jc = xmlDoc.createElementNS(wNS, 'w:jc');
+        jc.setAttribute('w:val', 'both');
+
+        // Insert so that pPr's rPr (if any) remains last, which Word expects.
+        let pPrRPr = null;
+        for (const child of pPr.children) {
+            if (child.localName === 'rPr' && child.namespaceURI === wNS) {
+                pPrRPr = child;
+                break;
+            }
+        }
+        if (pPrRPr) {
+            pPr.insertBefore(spacing, pPrRPr);
+            pPr.insertBefore(jc, pPrRPr);
+        } else {
+            pPr.appendChild(spacing);
+            pPr.appendChild(jc);
+        }
+
+        // Apply run formatting to the paragraph-mark rPr so the pilcrow
+        // itself carries the target font/size.
+        if (!pPrRPr) {
+            pPrRPr = xmlDoc.createElementNS(wNS, 'w:rPr');
+            pPr.appendChild(pPrRPr);
+        }
+        this._applyRunFormatting(xmlDoc, pPrRPr);
+
+        // Apply run formatting to every run inside the paragraph, including
+        // runs wrapped in w:ins / w:del revision marks.
+        const runs = paraElem.getElementsByTagNameNS(wNS, 'r');
+        for (const run of Array.from(runs)) {
+            let rPr = null;
+            for (const child of run.children) {
+                if (child.localName === 'rPr' && child.namespaceURI === wNS) {
+                    rPr = child;
+                    break;
+                }
+            }
+            if (!rPr) {
+                rPr = xmlDoc.createElementNS(wNS, 'w:rPr');
+                run.insertBefore(rPr, run.firstChild);
+            }
+            this._applyRunFormatting(xmlDoc, rPr);
+        }
+    },
+
+    /**
+     * Apply font and size overrides to a w:rPr element.
+     * Replaces any existing rFonts / sz / szCs; leaves other properties alone.
+     */
+    _applyRunFormatting(xmlDoc, rPr) {
+        const wNS = this.W_NS;
+
+        for (const child of Array.from(rPr.children)) {
+            if (child.namespaceURI === wNS &&
+                (child.localName === 'rFonts' ||
+                 child.localName === 'sz' ||
+                 child.localName === 'szCs')) {
+                rPr.removeChild(child);
+            }
+        }
+
+        // 宋体 for East Asian text, Times New Roman for Latin/complex.
+        const rFonts = xmlDoc.createElementNS(wNS, 'w:rFonts');
+        rFonts.setAttribute('w:ascii', 'Times New Roman');
+        rFonts.setAttribute('w:hAnsi', 'Times New Roman');
+        rFonts.setAttribute('w:cs', 'Times New Roman');
+        rFonts.setAttribute('w:eastAsia', '宋体');
+        rPr.insertBefore(rFonts, rPr.firstChild);
+
+        // 小四 = 12pt = 24 half-points.
+        const sz = xmlDoc.createElementNS(wNS, 'w:sz');
+        sz.setAttribute('w:val', '24');
+        const szCs = xmlDoc.createElementNS(wNS, 'w:szCs');
+        szCs.setAttribute('w:val', '24');
+        rPr.appendChild(sz);
+        rPr.appendChild(szCs);
+    },
+
     // ==================== New DOCX Generation (for non-DOCX sources) ====================
 
     /**
@@ -365,12 +494,27 @@ const Generator = {
 </Relationships>`);
 
         // word/styles.xml
+        // docDefaults enforce: 宋体 + Times New Roman, 小四 (12pt = 24 half-points),
+        // 单倍行距, 段后 1.5 行 (afterLines=150), 两端对齐 (jc=both).
         zip.file('word/styles.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults>
+    <w:rPrDefault>
+      <w:rPr>
+        <w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman" w:eastAsia="宋体"/>
+        <w:sz w:val="24"/>
+        <w:szCs w:val="24"/>
+      </w:rPr>
+    </w:rPrDefault>
+    <w:pPrDefault>
+      <w:pPr>
+        <w:spacing w:after="360" w:afterLines="150" w:line="240" w:lineRule="auto"/>
+        <w:jc w:val="both"/>
+      </w:pPr>
+    </w:pPrDefault>
+  </w:docDefaults>
   <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
     <w:name w:val="Normal"/>
-    <w:pPr><w:spacing w:after="200" w:line="276" w:lineRule="auto"/></w:pPr>
-    <w:rPr><w:rFonts w:ascii="等线" w:eastAsia="等线" w:hAnsi="等线"/><w:sz w:val="21"/></w:rPr>
   </w:style>
   <w:style w:type="paragraph" w:styleId="Heading1">
     <w:name w:val="heading 1"/>
