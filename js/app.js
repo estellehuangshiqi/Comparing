@@ -37,6 +37,11 @@
     const downloadHint = document.getElementById('downloadHint');
     const errorSection = document.getElementById('errorSection');
     const errorText = document.getElementById('errorText');
+    const catBox = document.getElementById('catBox');
+    const catInput = document.getElementById('catInput');
+    const catPreview = document.getElementById('catPreview');
+    const catPlaceholder = document.getElementById('catPlaceholder');
+    const removeCat = document.getElementById('removeCat');
 
     const SUPPORTED_TYPES = ['.docx', '.pdf', '.xlsx', '.xls'];
 
@@ -124,6 +129,66 @@
 
     function updateCompareButton() {
         btnCompare.disabled = !(fileA && fileB);
+    }
+
+    // ==================== Cat Image Upload ====================
+
+    function setupCatUpload() {
+        catBox.addEventListener('click', (e) => {
+            if (e.target.closest('.btn-remove-cat')) return;
+            catInput.click();
+        });
+
+        catBox.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            catBox.classList.add('dragover');
+        });
+
+        catBox.addEventListener('dragleave', () => {
+            catBox.classList.remove('dragover');
+        });
+
+        catBox.addEventListener('drop', (e) => {
+            e.preventDefault();
+            catBox.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file) handleCatFile(file);
+        });
+
+        catInput.addEventListener('change', () => {
+            if (catInput.files[0]) handleCatFile(catInput.files[0]);
+        });
+
+        removeCat.addEventListener('click', (e) => {
+            e.stopPropagation();
+            clearCatImage();
+        });
+    }
+
+    function handleCatFile(file) {
+        if (!file.type.startsWith('image/')) {
+            showError('请上传图片文件（PNG / JPG / GIF / WebP）');
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            catPreview.src = e.target.result;
+            catPreview.style.display = '';
+            catPlaceholder.style.display = 'none';
+            removeCat.style.display = '';
+            catBox.classList.add('has-image');
+        };
+        reader.readAsDataURL(file);
+        hideError();
+    }
+
+    function clearCatImage() {
+        catPreview.src = '';
+        catPreview.style.display = 'none';
+        catPlaceholder.style.display = '';
+        removeCat.style.display = 'none';
+        catBox.classList.remove('has-image');
+        catInput.value = '';
     }
 
     // ==================== Progress ====================
@@ -355,6 +420,7 @@
     function init() {
         setupUploadBox(uploadBoxA, fileInputA, 'A');
         setupUploadBox(uploadBoxB, fileInputB, 'B');
+        setupCatUpload();
 
         removeA.addEventListener('click', (e) => {
             e.stopPropagation();
